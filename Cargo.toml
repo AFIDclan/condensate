@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/sdk", "crates/server", "crates/cli", "client/src-tauri"]
+# The desktop client needs WebView system libraries; build it explicitly with `-p condensate-client`
+# or `npm run tauri dev`. Plain `cargo build`/`cargo test` skip it so the server box needs nothing extra.
+default-members = ["crates/core", "crates/sdk", "crates/server", "crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+condensate-core = { path = "crates/core" }
+condensate-sdk = { path = "crates/sdk" }
+
+anyhow = "1"
+argon2 = "0.5"
+axum = "0.8"
+blake3 = "1"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "5"
+fastcdc = "3"
+futures = "0.3"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+walkdir = "2"
+zstd = "0.13"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1

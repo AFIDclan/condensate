@@ -1,0 +1,312 @@
+//! Commands invoked from the React UI. Errors are plain strings; an error starting with
+//! [`NOT_LOGGED_IN`] tells the UI to show the login screen.
+
+use condensate_core::api::*;
+use condensate_core::install::read_installed;
+use condensate_core::platform;
+use condensate_sdk::pull::{PullEvent, PullOptions, PullReport};
+use condensate_sdk::{ApiError, Client};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_opener::OpenerExt;
+
+use crate::state::{AppState, Job};
+
+pub type CmdResult<T> = Result<T, String>;
+
+pub const NOT_LOGGED_IN: &str = "NOT_LOGGED_IN";
+
+/// Turn an SDK error into a UI message, flagging expired sessions.
+fn err(e: anyhow::Error) -> String {
+    if let Some(api) = e.downcast_ref::<ApiError>() {
+        if api.status == 401 {
+            return format!("{NOT_LOGGED_IN}: {}", api.message);
+        }
+        return api.message.clone();
+    }
+    format!("{e:#}")
+}
+
+fn current_platform() -> CmdResult<&'static str> {
+    platform::current().ok_or_else(|| "this operating system is not supported yet".to_string())
+}
+
+// ---- session ------------------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct Session {
+    server: String,
+    user: Option<User>,
+    library_dir: String,
+    platform: Option<&'static str>,
+}
+
+#[tauri::command]
+pub async fn session(state: State<'_, AppState>) -> CmdResult<Session> {
+    let server = state.server();
+    let user = match state.client() {
+        Ok(client) => match client.me().await {
+            Ok(u) => Some(u),
+            Err(e) if e.downcast_ref::<ApiError>().is_some_and(|a| a.status == 401) => {
+                state.update_settings(|s| s.token = None)?;
+                None
+            }
+            Err(e) => return Err(format!("Can't reach {server}: {}", err(e))),
+        },
+        Err(_) => None,
+    };
+    Ok(Session {
+        server,
+        user,
+        library_dir: state.library_dir().display().to_string(),
+        platform: platform::current(),
+    })
+}
+
+fn save_login(state: &AppState, server: &str, resp: &AuthResponse) -> CmdResult<()> {
+    state.update_settings(|s| {
+        s.server = server.to_string();
+        s.token = Some(resp.token.clone());
+        s.username = Some(resp.user.username.clone());
+    })
+}
+
+fn normalize_server(server: &str) -> CmdResult<String> {
+    let s = server.trim().trim_end_matches('/');
+    if !(s.starts_with("https://") || s.starts_with("http://")) {
+        return Err("server address must start with https://".into());
+    }
+    Ok(s.to_string())
+}
+
+#[tauri::command]
+pub async fn login(state: State<'_, AppState>, server: String, username: String, password: String) -> CmdResult<User> {
+    let server = normalize_server(&server)?;
+    let client = Client::new(&server, None).map_err(err)?;
+    let resp = client.login(&LoginRequest { username, password }).await.map_err(err)?;
+    save_login(&state, &server, &resp)?;
+    Ok(resp.user)
+}
+
+#[tauri::command]
+pub async fn register(
+    state: State<'_, AppState>,
+    server: String,
+    username: String,
+    password: String,
+    invite: String,
+) -> CmdResult<User> {
+    let server = normalize_server(&server)?;
+    let client = Client::new(&server, None).map_err(err)?;
+    let req = RegisterRequest { username, password, display_name: None, invite_code: Some(invite) };
+    let resp = client.register(&req).await.map_err(err)?;
+    save_login(&state, &server, &resp)?;
+    Ok(resp.user)
+}
+
+#[tauri::command]
+pub async fn logout(state: State<'_, AppState>) -> CmdResult<()> {
+    if let Ok(client) = state.client() {
+        let _ = client.logout().await;
+    }
+    state.update_settings(|s| s.token = None)
+}
+
+// ---- library & store -------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct InstalledInfo {
+    version: String,
+    size: u64,
+    dir: String,
+}
+
+#[derive(Serialize)]
+pub struct LibraryItem {
+    game: GameSummary,
+    latest: Option<LatestBuild>,
+    installed: Option<InstalledInfo>,
+    update_available: bool,
+    job: Option<Job>,
+    running: bool,
+}
+
+#[tauri::command]
+pub async fn library(state: State<'_, AppState>) -> CmdResult<Vec<LibraryItem>> {
+    let client = state.client()?;
+    let entries = client.library(platform::current()).await.map_err(err)?;
+    let jobs = state.jobs.lock().unwrap().clone();
+    let running = state.running.lock().unwrap().clone();
+    Ok(entries
+        .into_iter()
+        .map(|e| {
+            let dir = state.game_dir(&e.game.slug);
+            let installed = read_installed(&dir).ok().flatten().filter(|s| s.game == e.game.slug);
+            let update_available = match (&installed, &e.latest) {
+                (Some(i), Some(l)) => i.manifest.hash() != l.manifest_hash || i.version != l.version,
+                _ => false,
+            };
+            LibraryItem {
+                installed: installed.map(|s| InstalledInfo {
+                    version: s.version,
+                    size: s.manifest.total_size(),
+                    dir: dir.display().to_string(),
+                }),
+                update_available,
+                job: jobs.get(&e.game.slug).cloned(),
+                running: running.contains_key(&e.game.slug),
+                latest: e.latest,
+                game: e.game,
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn store(state: State<'_, AppState>, query: Option<String>) -> CmdResult<Vec<GameSummary>> {
+    state.client()?.search_games(query.as_deref()).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn game(state: State<'_, AppState>, slug: String) -> CmdResult<GameDetail> {
+    state.client()?.game(&slug).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn add_to_library(state: State<'_, AppState>, slug: String) -> CmdResult<()> {
+    state.client()?.library_add(&slug).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn remove_from_library(state: State<'_, AppState>, slug: String) -> CmdResult<()> {
+    state.client()?.library_remove(&slug).await.map_err(err)
+}
+
+// ---- install / update / uninstall -----------------------------------------------------------
+
+#[derive(Clone, Serialize)]
+struct JobFinished {
+    slug: String,
+    ok: bool,
+    error: Option<String>,
+    report: Option<PullReport>,
+}
+
+/// Start installing or updating a game. Progress arrives as `job` events and the end as a
+/// `job-finished` event.
+#[tauri::command]
+pub async fn install(app: AppHandle, state: State<'_, AppState>, slug: String) -> CmdResult<()> {
+    let client = state.client()?;
+    let platform = current_platform()?;
+    if state.running.lock().unwrap().contains_key(&slug) {
+        return Err("close the game before updating it".into());
+    }
+    {
+        let mut jobs = state.jobs.lock().unwrap();
+        if jobs.contains_key(&slug) {
+            return Err("already installing".into());
+        }
+        let job = Job { slug: slug.clone(), phase: "checking".into(), done_bytes: 0, total_bytes: 0, reused_bytes: 0 };
+        jobs.insert(slug.clone(), job.clone());
+        let _ = app.emit("job", job);
+    }
+    let dir = state.game_dir(&slug);
+
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let on_event = |e: PullEvent| {
+            let mut jobs = state.jobs.lock().unwrap();
+            let Some(job) = jobs.get_mut(&slug) else { return };
+            match e {
+                PullEvent::Checking => job.phase = "checking".into(),
+                PullEvent::Planned { download_bytes, reused_bytes, .. } => {
+                    job.phase = "downloading".into();
+                    job.total_bytes = download_bytes;
+                    job.reused_bytes = reused_bytes;
+                }
+                PullEvent::Downloading { done_bytes, total_bytes, .. } => {
+                    job.phase = "downloading".into();
+                    job.done_bytes = done_bytes;
+                    job.total_bytes = total_bytes;
+                }
+                PullEvent::Applying => job.phase = "installing".into(),
+            }
+            let _ = app.emit("job", job.clone());
+        };
+        let opts = PullOptions { game: slug.clone(), platform: platform.into(), dir, repair: false };
+        let result = condensate_sdk::pull::pull(&client, opts, &on_event).await;
+        state.jobs.lock().unwrap().remove(&slug);
+        let finished = match result {
+            Ok(report) => JobFinished { slug, ok: true, error: None, report: Some(report) },
+            Err(e) => JobFinished { slug, ok: false, error: Some(err(e)), report: None },
+        };
+        let _ = app.emit("job-finished", finished);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn uninstall(state: State<'_, AppState>, slug: String) -> CmdResult<()> {
+    if state.running.lock().unwrap().contains_key(&slug) {
+        return Err("close the game first".into());
+    }
+    if state.jobs.lock().unwrap().contains_key(&slug) {
+        return Err("wait for the download to finish".into());
+    }
+    let dir = state.game_dir(&slug);
+    if dir.exists() {
+        tauri::async_runtime::spawn_blocking(move || std::fs::remove_dir_all(dir))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("couldn't delete the game files: {e}"))?;
+    }
+    Ok(())
+}
+
+// ---- play -----------------------------------------------------------------------------------
+
+#[derive(Clone, Serialize)]
+struct GameExited {
+    slug: String,
+    code: Option<i32>,
+}
+
+#[tauri::command]
+pub async fn play(app: AppHandle, state: State<'_, AppState>, slug: String) -> CmdResult<()> {
+    if state.running.lock().unwrap().contains_key(&slug) {
+        return Err("already running".into());
+    }
+    let dir = state.game_dir(&slug);
+    let mut child = condensate_sdk::launch::launch(&dir).map_err(err)?;
+    state.running.lock().unwrap().insert(slug.clone(), child.id());
+    let _ = app.emit("game-started", &slug);
+    std::thread::spawn(move || {
+        let code = child.wait().ok().and_then(|s| s.code());
+        app.state::<AppState>().running.lock().unwrap().remove(&slug);
+        let _ = app.emit("game-exited", GameExited { slug, code });
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn open_game_folder(app: AppHandle, state: State<'_, AppState>, slug: String) -> CmdResult<()> {
+    let dir = state.game_dir(&slug);
+    app.opener().open_path(dir.display().to_string(), None::<&str>).map_err(|e| e.to_string())
+}
+
+// ---- account ----------------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn create_invite(state: State<'_, AppState>) -> CmdResult<Invite> {
+    state.client()?.create_invite().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn list_invites(state: State<'_, AppState>) -> CmdResult<Vec<Invite>> {
+    state.client()?.list_invites().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn update_profile(state: State<'_, AppState>, display_name: Option<String>, bio: Option<String>) -> CmdResult<User> {
+    state.client()?.update_me(&UpdateProfileRequest { display_name, bio }).await.map_err(err)
+}

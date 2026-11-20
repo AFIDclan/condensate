@@ -1,0 +1,79 @@
+# Publishing a game to Condensate
+
+This guide is written for both people and AI coding agents. Publishing is a single command.
+
+## One-time setup (a person does this)
+
+1. Create the game id (lowercase letters, digits and dashes):
+   ```sh
+   condensate game create my-game --title "My Game" --summary "One line for the store"
+   ```
+2. Create a publish token for the agent. It can only publish, not manage the account. `--game` limits it to one game.
+   ```sh
+   condensate token create --name "claude agent" --game my-game
+   ```
+3. Give the agent these environment variables:
+   ```sh
+   CONDENSATE_SERVER=https://<server address>
+   CONDENSATE_TOKEN=cdp_...
+   ```
+
+## condensate.toml (keep in the game's repo)
+
+```toml
+game = "my-game"
+
+[[build]]
+platform = "windows-x64"      # or linux-x64
+dir = "export/windows"        # folder with the exported build, relative to this file
+exe = "MyGame.exe"            # path to the executable inside that folder
+
+[[build]]
+platform = "linux-x64"
+dir = "export/linux"
+exe = "MyGame.x86_64"
+# args = ["--fullscreen"]     # optional launch arguments
+# workdir = "."               # optional; defaults to the executable's folder
+```
+
+You only need the platforms you actually build. A version that ships only Windows leaves the latest Linux build available.
+
+## Every release
+
+1. Export or build the game into the `dir` folders.
+2. Push with a short changelog:
+   ```sh
+   condensate push -m "Added the boss fight; fixed jumping through walls"
+   ```
+
+Rules for the changelog:
+- One or two plain sentences that a player would understand.
+- Required. The push fails without it.
+
+The version number is optional. When you leave it out, the last number goes up by one (0.4.2 → 0.4.3). Pass `--version 1.0.0` to choose one yourself.
+
+What happens:
+- Every file is split into chunks.
+- Only chunks the server hasn't seen before are uploaded, so small changes upload in seconds even for large games.
+- Players' clients then download only the changed chunks.
+
+Useful flags:
+- `--only linux-x64` pushes one platform from the project file.
+- `--json` prints machine-readable output.
+- Without a project file: `condensate push --dir build --game my-game --platform linux-x64 --exe run.sh -m "..."`.
+
+## Checking the result
+
+```sh
+condensate versions my-game       # version history with changelogs
+condensate game info my-game
+```
+
+## Common errors
+
+| Message | Fix |
+|---|---|
+| `launch executable "X" is not part of the build` | `exe` must be a path inside `dir`, using `/` separators. |
+| `version X already exists` | Leave out `--version`, or choose a new one. |
+| `you can't publish this game` | The token belongs to another game or user. |
+| `path contains a character that is not allowed` | File names can't use `: * ? " < > |` or end with a dot or space, because Windows can't store them. |

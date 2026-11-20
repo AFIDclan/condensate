@@ -1,0 +1,22 @@
+[package]
+name = "condensate-server"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+condensate-core.workspace = true
+anyhow.workspace = true
+argon2.workspace = true
+axum.workspace = true
+blake3.workspace = true
+bytes.workspace = true
+clap.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
