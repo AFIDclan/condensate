@@ -1,45 +1,33 @@
-import { createContext, ReactNode, useCallback, useContext, useState } from "react";
-import { gameHue } from "./api";
-
-/** Generated cover art until games can upload their own. */
-export function Cover({ slug, title, size = "md" }: { slug: string; title: string; size?: "sm" | "md" | "lg" }) {
-  const hue = gameHue(slug);
-  const initials = title
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((w) => w[0]!.toUpperCase())
-    .join("");
-  return (
-    <div
-      className={`cover cover-${size}`}
-      style={{
-        background: `linear-gradient(135deg, hsl(${hue} 55% 38%), hsl(${(hue + 50) % 360} 60% 22%))`,
-      }}
-    >
-      <span>{initials}</span>
-    </div>
-  );
-}
+import { createContext, CSSProperties, ReactNode, useCallback, useContext, useState } from "react";
+import { api, imageUrl, LibraryItem } from "./api";
+import { jobFraction, primaryLabel, primaryOf, runPrimary, useActions } from "./data";
+import { Icon } from "./icons";
 
 export function Spinner() {
   return <div className="spinner" aria-label="Loading" />;
 }
 
-export function ProgressBar({ value }: { value: number | null }) {
+/** The main Play / Install / Update button; fills up while downloading. */
+export function PrimaryButton({ item, actions, size }: { item: LibraryItem; actions: ReturnType<typeof useActions>; size?: "sm" }) {
+  const kind = primaryOf(item);
+  const f = jobFraction(item.job);
   return (
-    <div className={`progress ${value === null ? "indeterminate" : ""}`}>
-      <div className="progress-fill" style={{ width: value === null ? undefined : `${Math.round(value * 100)}%` }} />
-    </div>
-  );
-}
-
-export function EmptyState({ title, children }: { title: string; children?: ReactNode }) {
-  return (
-    <div className="empty">
-      <h3>{title}</h3>
-      {children}
-    </div>
+    <button
+      className={`btn ${size ?? ""} k-${kind}`}
+      disabled={kind === "busy" || kind === "running" || kind === "unavailable"}
+      onClick={(e) => {
+        e.stopPropagation();
+        runPrimary(item, actions);
+      }}
+      style={{ "--fill": `${Math.round((f ?? 0) * 100)}%` } as CSSProperties}
+    >
+      <span>
+        {kind === "play" && <Icon name="play" size={size ? 15 : 18} />}
+        {kind === "install" && <Icon name="download" size={size ? 15 : 18} />}
+        {kind === "update" && <Icon name="update" size={size ? 15 : 18} />}
+        {primaryLabel(item)}
+      </span>
+    </button>
   );
 }
 
@@ -76,4 +64,40 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       </div>
     </ToastContext.Provider>
   );
+}
+
+/** Round avatar: the uploaded image, or the first letter of the name. */
+export function Avatar({ user, size = 36, status }: { user: { display_name: string; avatar?: string | null }; size?: number; status?: string }) {
+  const url = imageUrl(user.avatar);
+  return (
+    <span className="avatar-wrap" style={{ width: size, height: size }}>
+      {url ? (
+        <img className="avatar-img" src={url} alt="" draggable={false} />
+      ) : (
+        <span className="avatar-letter" style={{ fontSize: size * 0.42 }}>
+          {user.display_name[0]?.toUpperCase()}
+        </span>
+      )}
+      {status && <span className={`presence-dot p-${status}`} />}
+    </span>
+  );
+}
+
+/** Ask for an image file and upload it; resolves to the image id (or null if cancelled). */
+export function pickAndUploadImage(): Promise<string | null> {
+  return new Promise((resolve, reject) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/png,image/jpeg,image/gif,image/webp";
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return resolve(null);
+      try {
+        resolve(await api.uploadImage(await file.arrayBuffer()));
+      } catch (e) {
+        reject(e);
+      }
+    };
+    input.click();
+  });
 }

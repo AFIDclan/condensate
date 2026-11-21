@@ -33,6 +33,8 @@ struct SummaryRow {
     latest_version: Option<String>,
     platforms: Option<String>,
     in_library: bool,
+    cover_image: Option<String>,
+    banner_image: Option<String>,
 }
 
 impl SummaryRow {
@@ -55,11 +57,13 @@ impl SummaryRow {
             platforms,
             updated_at: self.updated_at,
             in_library: self.in_library,
+            cover: self.cover_image,
+            banner: self.banner_image,
         }
     }
 }
 
-const SUMMARY_SELECT: &str = "SELECT g.owner_id, g.slug, g.title, g.summary, g.visibility, g.updated_at,
+const SUMMARY_SELECT: &str = "SELECT g.owner_id, g.slug, g.title, g.summary, g.visibility, g.updated_at, g.cover_image, g.banner_image,
        u.username AS owner,
        (SELECT v.version FROM versions v WHERE v.game_id = g.id ORDER BY v.id DESC LIMIT 1) AS latest_version,
        (SELECT group_concat(DISTINCT b.platform) FROM builds b JOIN versions v ON v.id = b.version_id
@@ -316,6 +320,12 @@ pub async fn update(
     if let Some(v) = &req.visibility {
         validate_visibility(v)?;
     }
+    for (column, value) in [("cover_image", &req.cover_image), ("banner_image", &req.banner_image)] {
+        if let Some(v) = value {
+            let id = super::images::check_id(&st, v).await?;
+            sqlx::query(&format!("UPDATE games SET {column} = ? WHERE id = ?")).bind(id).bind(game.id).execute(&st.db).await?;
+        }
+    }
     sqlx::query(
         "UPDATE games SET title = COALESCE(?, title), summary = COALESCE(?, summary),
          description = COALESCE(?, description), visibility = COALESCE(?, visibility), updated_at = ?
@@ -521,7 +531,15 @@ pub async fn library(
             }),
             None => None,
         };
-        out.push(LibraryEntry { game, latest });
+        let played: Option<(i64, Option<i64>)> = sqlx::query_as(
+            "SELECT p.seconds, p.last_played_at FROM playtime p JOIN games g ON g.id = p.game_id WHERE p.user_id = ? AND g.slug = ?",
+        )
+        .bind(user.id)
+        .bind(&game.slug)
+        .fetch_optional(&st.db)
+        .await?;
+        let (playtime_seconds, last_played_at) = played.unwrap_or((0, None));
+        out.push(LibraryEntry { game, latest, playtime_seconds, last_played_at });
     }
     Ok(Json(out))
 }
@@ -554,6 +572,50 @@ pub async fn library_remove(
         .bind(game.id)
         .execute(&st.db)
         .await?;
+    Ok(Json(OkResponse { ok: true }))
+}
+
+/// All games you own, including unreleased and private ones.
+pub async fn my_games(State(st): State<AppState>, user: AuthUser) -> ApiResult<Json<Vec<GameSummary>>> {
+    Ok(Json(summaries_where(&st.db, user.id, "g.owner_id = ?1 ORDER BY g.updated_at DESC", vec![]).await?))
+}
+
+pub async fn delete_version(
+    State(st): State<AppState>,
+    user: AuthUser,
+    Path((slug, version)): Path<(String, String)>,
+) -> ApiResult<Json<OkResponse>> {
+    let game = load_game(&st.db, &slug, &user).await?;
+    if !user.can_publish(game.id, game.owner_id) {
+        return Err(forbidden("only the game's owner can delete versions"));
+    }
+    let res = sqlx::query("DELETE FROM versions WHERE game_id = ? AND version = ?").bind(game.id).bind(&version).execute(&st.db).await?;
+    if res.rows_affected() == 0 {
+        return Err(not_found(format!("{slug} has no version {version}")));
+    }
+    tracing::info!(game = %slug, %version, by = %user.username, "deleted version");
+    Ok(Json(OkResponse { ok: true }))
+}
+
+/// The client reports how long a play session lasted when the game exits.
+pub async fn report_playtime(
+    State(st): State<AppState>,
+    user: AuthUser,
+    Path(slug): Path<String>,
+    Json(req): Json<PlaytimeReport>,
+) -> ApiResult<Json<OkResponse>> {
+    let game = load_game(&st.db, &slug, &user).await?;
+    let seconds = req.seconds.clamp(0, 2 * 86400);
+    sqlx::query(
+        "INSERT INTO playtime (user_id, game_id, seconds, last_played_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (user_id, game_id) DO UPDATE SET seconds = seconds + ?3, last_played_at = ?4",
+    )
+    .bind(user.id)
+    .bind(game.id)
+    .bind(seconds)
+    .bind(now())
+    .execute(&st.db)
+    .await?;
     Ok(Json(OkResponse { ok: true }))
 }
 

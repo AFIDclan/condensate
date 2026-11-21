@@ -1,16 +1,28 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, errorMessage, LOGGED_OUT_EVENT, Session } from "./api";
-import { Spinner, ToastProvider } from "./components";
+import { listen } from "@tauri-apps/api/event";
+import "@fontsource/bebas-neue";
+import "@fontsource-variable/inter";
+import "./theme.css";
+import "./theme-social.css";
+import { api, errorMessage, LOGGED_OUT_EVENT, Session, setServer, User } from "./api";
+import { Avatar, Spinner, ToastProvider } from "./components";
+import { SocialProvider, useSocial } from "./social";
+import { installUpdate, useAvailableUpdate } from "./updater";
+import { useActions, useLibrary } from "./data";
 import Login from "./pages/Login";
 import Library from "./pages/Library";
 import Store from "./pages/Store";
-import GamePage from "./pages/GamePage";
+import Game from "./pages/Game";
 import Account from "./pages/Account";
+import Friends from "./pages/Friends";
+import Studio from "./pages/Studio";
 
 export type Route =
-  | { page: "library"; slug?: string }
+  | { page: "library" }
   | { page: "store" }
-  | { page: "game"; slug: string }
+  | { page: "game"; slug: string; from: "library" | "store" | "studio" }
+  | { page: "friends" }
+  | { page: "studio" }
   | { page: "account" };
 
 export default function App() {
@@ -20,7 +32,9 @@ export default function App() {
 
   const load = useCallback(async () => {
     try {
-      setSession(await api.session());
+      const s = await api.session();
+      setServer(s.server);
+      setSession(s);
       setOffline(null);
     } catch (e) {
       setOffline(errorMessage(e));
@@ -31,18 +45,23 @@ export default function App() {
     load();
     const onLoggedOut = () => load();
     window.addEventListener(LOGGED_OUT_EVENT, onLoggedOut);
-    return () => window.removeEventListener(LOGGED_OUT_EVENT, onLoggedOut);
+    // The CLI shares our login and may relaunch us to ask for one.
+    const unlisten = listen("refresh-session", () => load());
+    return () => {
+      window.removeEventListener(LOGGED_OUT_EVENT, onLoggedOut);
+      unlisten.then((f) => f());
+    };
   }, [load]);
 
   if (offline && !forceLogin) {
     return (
-      <div className="center-screen">
-        <div className="card narrow">
-          <Logo />
-          <p className="muted">{offline}</p>
-          <div className="row">
-            <button className="primary" onClick={load}>Retry</button>
-            <button onClick={() => setForceLogin(true)}>Change server</button>
+      <div className="login">
+        <div className="login-card">
+          <Wordmark />
+          <p className="dim">{offline}</p>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button className="plain-btn" onClick={load}>Retry</button>
+            <button className="plain-btn outline" onClick={() => setForceLogin(true)}>Change server</button>
           </div>
         </div>
       </div>
@@ -50,7 +69,7 @@ export default function App() {
   }
   if (!session && !forceLogin) {
     return (
-      <div className="center-screen">
+      <div className="center-fill">
         <Spinner />
       </div>
     );
@@ -68,52 +87,88 @@ export default function App() {
   }
   return (
     <ToastProvider>
-      <Shell session={session} onLogout={async () => { await api.logout(); load(); }} />
+      <SocialProvider me={session.user.username}>
+        <Shell
+          session={session}
+          onLogout={async () => {
+            await api.logout();
+            load();
+          }}
+          onUserChanged={(user) => setSession({ ...session, user })}
+        />
+      </SocialProvider>
     </ToastProvider>
   );
 }
 
-export function Logo() {
+export function Wordmark() {
   return (
-    <div className="logo">
+    <div className="wordmark">
       <img src="/icon.svg" alt="" />
-      <span>Condensate</span>
+      Condensate
     </div>
   );
 }
 
-function Shell({ session, onLogout }: { session: Session; onLogout: () => void }) {
+function Shell({ session, onLogout, onUserChanged }: { session: Session; onLogout: () => void; onUserChanged: (u: User) => void }) {
   const [route, setRoute] = useState<Route>({ page: "library" });
+  const { items, refresh } = useLibrary();
+  const actions = useActions(refresh);
+  const social = useSocial();
+  const update = useAvailableUpdate();
   const user = session.user!;
+  const section = route.page === "game" ? route.from : route.page;
+  const friendBadge = social.unread + (social.friends?.incoming.length ?? 0);
 
-  const tab = (page: Route["page"], label: string) => (
-    <button
-      className={`tab ${route.page === page || (page === "store" && route.page === "game") ? "active" : ""}`}
-      onClick={() => setRoute({ page } as Route)}
-    >
+  const tab = (page: "library" | "store" | "friends" | "studio", label: string, badge = 0) => (
+    <button className={section === page ? "on" : ""} onClick={() => setRoute({ page })}>
       {label}
+      {badge > 0 && <span className="tab-badge">{badge}</span>}
     </button>
   );
 
   return (
     <div className="shell">
+      {update && (
+        <div className="update-bar">
+          Condensate {update} is ready.
+          <button className="plain-btn" onClick={() => installUpdate()}>
+            Restart to update
+          </button>
+        </div>
+      )}
       <header className="topbar">
-        <Logo />
-        <nav>
+        <Wordmark />
+        <nav className="tabs">
           {tab("library", "Library")}
           {tab("store", "Store")}
-          <button className="tab" disabled title="Coming soon">Friends</button>
+          {tab("friends", "Friends", friendBadge)}
+          {tab("studio", "Studio")}
         </nav>
-        <button className={`user-chip ${route.page === "account" ? "active" : ""}`} onClick={() => setRoute({ page: "account" })}>
-          <span className="avatar">{user.display_name[0]?.toUpperCase()}</span>
-          {user.display_name}
+        <div className="grow" />
+        <button className={`me ${section === "account" ? "on" : ""}`} onClick={() => setRoute({ page: "account" })} title="Account & settings">
+          <Avatar user={user} size={34} status={social.connected ? "online" : "offline"} />
+          <span>{user.display_name}</span>
         </button>
       </header>
       <main className="content">
-        {route.page === "library" && <Library selected={route.slug} navigate={setRoute} />}
-        {route.page === "store" && <Store navigate={setRoute} />}
-        {route.page === "game" && <GamePage slug={route.slug} navigate={setRoute} />}
-        {route.page === "account" && <Account session={session} onLogout={onLogout} />}
+        {route.page === "library" && (
+          <Library items={items} actions={actions} open={(slug) => setRoute({ page: "game", slug, from: "library" })} goStore={() => setRoute({ page: "store" })} />
+        )}
+        {route.page === "store" && <Store items={items} open={(slug) => setRoute({ page: "game", slug, from: "store" })} />}
+        {route.page === "game" && (
+          <Game
+            key={route.slug}
+            slug={route.slug}
+            item={items?.find((i) => i.game.slug === route.slug)}
+            actions={actions}
+            backLabel={route.from === "store" ? "Store" : route.from === "studio" ? "Studio" : "Library"}
+            onBack={() => setRoute({ page: route.from })}
+          />
+        )}
+        {route.page === "friends" && <Friends me={user.username} />}
+        {route.page === "studio" && <Studio server={session.server} openStorePage={(slug) => setRoute({ page: "game", slug, from: "studio" })} />}
+        {route.page === "account" && <Account session={session} onLogout={onLogout} onUserChanged={onUserChanged} />}
       </main>
     </div>
   );

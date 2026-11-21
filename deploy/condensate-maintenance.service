@@ -1,0 +1,11 @@
+[Unit]
+Description=Condensate nightly backup and storage cleanup
+
+[Service]
+Type=oneshot
+User=sean
+WorkingDirectory=/home/sean/condensate-server
+EnvironmentFile=-/home/sean/condensate-server/condensate.env
+Environment=CONDENSATE_DATA_DIR=/home/sean/condensate-server/data
+ExecStart=/home/sean/condensate-server/bin/condensate-server backup --keep 14
+ExecStart=/home/sean/condensate-server/bin/condensate-server gc

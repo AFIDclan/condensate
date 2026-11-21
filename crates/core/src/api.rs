@@ -35,6 +35,9 @@ pub struct User {
     pub bio: String,
     pub is_admin: bool,
     pub created_at: i64,
+    /// Image id; fetch from `<server>/images/<id>`.
+    #[serde(default)]
+    pub avatar: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +64,9 @@ pub struct AuthResponse {
 pub struct UpdateProfileRequest {
     pub display_name: Option<String>,
     pub bio: Option<String>,
+    /// An uploaded image id, or "" to remove the avatar.
+    #[serde(default)]
+    pub avatar_image: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +125,12 @@ pub struct GameSummary {
     pub platforms: Vec<String>,
     pub updated_at: i64,
     pub in_library: bool,
+    /// 2:3 poster image id.
+    #[serde(default)]
+    pub cover: Option<String>,
+    /// 16:9 banner image id.
+    #[serde(default)]
+    pub banner: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +156,11 @@ pub struct UpdateGameRequest {
     pub summary: Option<String>,
     pub description: Option<String>,
     pub visibility: Option<String>,
+    /// Uploaded image ids, or "" to remove.
+    #[serde(default)]
+    pub cover_image: Option<String>,
+    #[serde(default)]
+    pub banner_image: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,4 +233,91 @@ pub struct LibraryEntry {
     pub game: GameSummary,
     /// Newest build for the platform asked for, if there is one.
     pub latest: Option<LatestBuild>,
+    #[serde(default)]
+    pub playtime_seconds: i64,
+    #[serde(default)]
+    pub last_played_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaytimeReport {
+    pub seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUploaded {
+    pub id: String,
+}
+
+// ---- social -----------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresenceGame {
+    pub slug: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Presence {
+    /// online | in_game | offline
+    pub status: String,
+    pub game: Option<PresenceGame>,
+    pub last_seen_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Friend {
+    pub user: User,
+    pub presence: Presence,
+    /// When you became friends.
+    pub since: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FriendsResponse {
+    pub friends: Vec<Friend>,
+    /// Requests waiting for you to accept.
+    pub incoming: Vec<User>,
+    /// Requests you sent.
+    pub outgoing: Vec<User>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub id: i64,
+    pub from: String,
+    pub to: String,
+    pub body: String,
+    pub created_at: i64,
+    pub read_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendMessageRequest {
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Conversation {
+    pub user: User,
+    pub last: Option<ChatMessage>,
+    pub unread: i64,
+}
+
+/// Server -> client events on the `/api/v1/ws` socket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WsEvent {
+    Presence { user: String, presence: Presence },
+    Message { message: ChatMessage },
+    FriendsChanged,
+}
+
+/// Client -> server commands on the socket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WsCommand {
+    Ping,
+    /// What the user is playing right now (`None` when they stop).
+    Playing { game: Option<String> },
 }

@@ -1,47 +1,15 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
-
-/// Saved login, at `<config dir>/condensate/cli.json`.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct Saved {
-    pub server: Option<String>,
-    pub token: Option<String>,
-    pub username: Option<String>,
-}
-
-fn saved_path() -> Result<PathBuf> {
-    Ok(dirs::config_dir().context("no config directory on this system")?.join("condensate").join("cli.json"))
-}
-
-impl Saved {
-    pub fn load() -> Result<Self> {
-        let p = saved_path()?;
-        match std::fs::read(&p) {
-            Ok(b) => serde_json::from_slice(&b).with_context(|| format!("corrupt {}", p.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    pub fn save(&self) -> Result<()> {
-        let p = saved_path()?;
-        std::fs::create_dir_all(p.parent().unwrap())?;
-        std::fs::write(&p, serde_json::to_vec_pretty(self)?)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(())
-    }
-}
+use serde::Deserialize;
 
 /// `condensate.toml`, kept in a game's repository so pushing is a single command.
 ///
 /// ```toml
 /// game = "my-game"
+///
+/// cover = "art/cover.png"     # optional 2:3 poster
+/// banner = "art/banner.png"   # optional 16:9 banner
 ///
 /// [[build]]
 /// platform = "windows-x64"
@@ -58,8 +26,19 @@ impl Saved {
 pub struct ProjectFile {
     pub game: String,
     pub server: Option<String>,
+    /// Optional store artwork, uploaded by `condensate push` when it changes.
+    pub cover: Option<PathBuf>,
+    pub banner: Option<PathBuf>,
     #[serde(default, rename = "build")]
     pub builds: Vec<ProjectBuild>,
+    #[serde(skip)]
+    pub art: ProjectArt,
+}
+
+#[derive(Debug, Default)]
+pub struct ProjectArt {
+    pub cover: Option<PathBuf>,
+    pub banner: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +61,8 @@ impl ProjectFile {
         }
         // Build dirs are relative to the file, not to wherever the command was run.
         let base = path.parent().unwrap_or(Path::new("."));
+        let resolve = |p: &Option<PathBuf>| p.as_ref().map(|p| if p.is_relative() { base.join(p) } else { p.clone() });
+        project.art = ProjectArt { cover: resolve(&project.cover), banner: resolve(&project.banner) };
         for b in &mut project.builds {
             if b.dir.is_relative() {
                 b.dir = base.join(&b.dir);

@@ -204,6 +204,74 @@ impl Client {
         self.delete::<OkResponse>(&format!("/library/{slug}")).await.map(|_| ())
     }
 
+    pub async fn my_games(&self) -> Result<Vec<GameSummary>> {
+        self.get("/me/games").await
+    }
+
+    pub async fn delete_version(&self, slug: &str, version: &str) -> Result<()> {
+        self.delete::<OkResponse>(&format!("/games/{slug}/versions/{version}")).await.map(|_| ())
+    }
+
+    pub async fn report_playtime(&self, slug: &str, seconds: i64) -> Result<()> {
+        self.post::<_, OkResponse>(&format!("/games/{slug}/playtime"), &PlaytimeReport { seconds }).await.map(|_| ())
+    }
+
+    /// Upload a PNG/JPEG/GIF/WebP image; returns its id.
+    pub async fn upload_image(&self, bytes: Vec<u8>) -> Result<String> {
+        let rb = self.req(Method::PUT, "/images").body(bytes);
+        Ok(self.send::<ImageUploaded>(rb).await?.id)
+    }
+
+    /// Public URL of an uploaded image.
+    pub fn image_url(&self, id: &str) -> String {
+        format!("{}/images/{id}", self.base)
+    }
+
+    // ---- social ------------------------------------------------------------------------------
+
+    pub async fn search_users(&self, query: &str) -> Result<Vec<User>> {
+        self.send(self.req(Method::GET, "/users").query(&[("q", query)])).await
+    }
+
+    pub async fn friends(&self) -> Result<FriendsResponse> {
+        self.get("/friends").await
+    }
+
+    pub async fn add_friend(&self, username: &str) -> Result<()> {
+        self.put_empty::<OkResponse>(&format!("/friends/{username}")).await.map(|_| ())
+    }
+
+    pub async fn remove_friend(&self, username: &str) -> Result<()> {
+        self.delete::<OkResponse>(&format!("/friends/{username}")).await.map(|_| ())
+    }
+
+    pub async fn conversations(&self) -> Result<Vec<Conversation>> {
+        self.get("/conversations").await
+    }
+
+    pub async fn messages(&self, username: &str, before: Option<i64>) -> Result<Vec<ChatMessage>> {
+        let mut rb = self.req(Method::GET, &format!("/messages/{username}"));
+        if let Some(b) = before {
+            rb = rb.query(&[("before", b)]);
+        }
+        self.send(rb).await
+    }
+
+    pub async fn send_message(&self, username: &str, body: &str) -> Result<ChatMessage> {
+        self.post(&format!("/messages/{username}"), &SendMessageRequest { body: body.into() }).await
+    }
+
+    pub async fn mark_read(&self, username: &str) -> Result<()> {
+        self.post::<_, OkResponse>(&format!("/messages/{username}/read"), &serde_json::json!({})).await.map(|_| ())
+    }
+
+    /// WebSocket URL for live events (presence, messages).
+    pub fn ws_url(&self) -> Option<String> {
+        let token = self.token.as_deref()?;
+        let base = self.base.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
+        Some(format!("{base}/api/v1/ws?token={token}"))
+    }
+
     // ---- chunks ----------------------------------------------------------------------------------
 
     pub async fn missing_chunks(&self, hashes: &[String]) -> Result<Vec<String>> {

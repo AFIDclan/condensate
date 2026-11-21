@@ -4,14 +4,13 @@ This guide is written for both people and AI coding agents. Publishing is a sing
 
 ## One-time setup (a person does this)
 
-1. Create the game id (lowercase letters, digits and dashes):
+The Condensate app installs the `condensate` command and shares its login with it. If a command needs a login and you aren't logged in, it opens the app so you can log in there.
+
+1. Create the game: in the app, go to **Studio → New game**. Or from a terminal (the game id is lowercase letters, digits and dashes):
    ```sh
    condensate game create my-game --title "My Game" --summary "One line for the store"
    ```
-2. Create a publish token for the agent. It can only publish, not manage the account. `--game` limits it to one game.
-   ```sh
-   condensate token create --name "claude agent" --game my-game
-   ```
+2. Create a publish token for the agent: **Studio → your game → Publish tokens → New token**, or run `condensate token create --name "claude agent" --game my-game`. A publish token can only publish that one game. It can't manage the account.
 3. Give the agent these environment variables:
    ```sh
    CONDENSATE_SERVER=https://<server address>
@@ -22,6 +21,8 @@ This guide is written for both people and AI coding agents. Publishing is a sing
 
 ```toml
 game = "my-game"
+cover = "art/cover.png"       # optional store poster, portrait 2:3 (e.g. 600x900)
+banner = "art/banner.png"     # optional store banner, landscape 16:9 (e.g. 1920x1080)
 
 [[build]]
 platform = "windows-x64"      # or linux-x64
@@ -61,6 +62,21 @@ Useful flags:
 - `--only linux-x64` pushes one platform from the project file.
 - `--json` prints machine-readable output.
 - Without a project file: `condensate push --dir build --game my-game --platform linux-x64 --exe run.sh -m "..."`.
+
+## Artwork
+
+When `condensate.toml` names a `cover` or `banner`, `condensate push` uploads it if it changed. To set artwork without pushing a build:
+```sh
+condensate game edit my-game --cover art/cover.png --banner art/banner.png
+```
+You can also upload artwork in the app under **Studio → Artwork**. Images can be PNG, JPEG, GIF or WebP, up to 8 MB each.
+
+## Removing a bad version
+
+```sh
+condensate game delete-version my-game 0.4.3
+```
+Or use **Studio → Versions**. Players are then offered the newest remaining version.
 
 ## Checking the result
 

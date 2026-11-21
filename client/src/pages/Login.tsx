@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
 import { api, errorMessage } from "../api";
-import { Logo } from "../App";
+import { Wordmark } from "../App";
 
 const DEFAULT_SERVER = "https://oort-cloud.tail4b4a9d.ts.net";
 
@@ -30,22 +30,22 @@ export default function Login({ server: initialServer, onDone }: { server: strin
   }
 
   return (
-    <div className="center-screen login-bg">
-      <form className="card narrow" onSubmit={submit}>
-        <Logo />
+    <div className="login">
+      <form className="login-card" onSubmit={submit}>
+        <Wordmark />
         <div className="segmented">
-          <button type="button" className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>
+          <button type="button" className={mode === "login" ? "on" : ""} onClick={() => setMode("login")}>
             Log in
           </button>
-          <button type="button" className={mode === "register" ? "active" : ""} onClick={() => setMode("register")}>
+          <button type="button" className={mode === "register" ? "on" : ""} onClick={() => setMode("register")}>
             Create account
           </button>
         </div>
-        <label>
+        <label className="field">
           Username
           <input value={username} onChange={(e) => setUsername(e.target.value)} autoFocus autoComplete="username" required />
         </label>
-        <label>
+        <label className="field">
           Password
           <input
             type="password"
@@ -57,26 +57,26 @@ export default function Login({ server: initialServer, onDone }: { server: strin
           />
         </label>
         {mode === "register" && (
-          <label>
+          <label className="field">
             Invite code
             <input value={invite} onChange={(e) => setInvite(e.target.value)} placeholder="XXXX-XXXX-XXXX" required />
-            <small className="muted">Ask a friend who's already on the server for one.</small>
           </label>
         )}
-        {showServer ? (
-          <label>
+        {showServer && (
+          <label className="field">
             Server
             <input value={server} onChange={(e) => setServer(e.target.value)} required />
           </label>
-        ) : (
-          <button type="button" className="link" onClick={() => setShowServer(true)}>
+        )}
+        {error && <div className="error">{error}</div>}
+        <button className="btn" disabled={busy}>
+          <span>{busy ? "…" : mode === "login" ? "Log in" : "Create account"}</span>
+        </button>
+        {!showServer && (
+          <button type="button" className="server-link" onClick={() => setShowServer(true)}>
             Server: {server.replace(/^https?:\/\//, "")}
           </button>
         )}
-        {error && <div className="error">{error}</div>}
-        <button className="primary big" disabled={busy}>
-          {busy ? "…" : mode === "login" ? "Log in" : "Create account"}
-        </button>
       </form>
     </div>
   );

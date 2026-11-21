@@ -1,11 +1,14 @@
-mod accounts;
+pub mod accounts;
 mod chunks;
 mod games;
+pub mod images;
+pub mod social;
 
 use axum::extract::{DefaultBodyLimit, State};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use condensate_core::api::ServerInfo;
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 use crate::error::ApiResult;
@@ -31,12 +34,30 @@ pub fn router(state: AppState) -> Router {
         .route("/games/{slug}/builds/{platform}", get(games::latest_build))
         .route("/library", get(games::library))
         .route("/library/{slug}", put(games::library_add).delete(games::library_remove))
+        .route("/me/games", get(games::my_games))
+        .route("/games/{slug}/versions/{version}", delete(games::delete_version))
+        .route("/games/{slug}/playtime", post(games::report_playtime))
+        // images
+        .route("/images", put(images::upload))
+        // social
+        .route("/users", get(social::search_users))
+        .route("/friends", get(social::list_friends))
+        .route("/friends/{username}", put(social::add_friend).delete(social::remove_friend))
+        .route("/conversations", get(social::conversations))
+        .route("/messages/{username}", get(social::history).post(social::send))
+        .route("/messages/{username}/read", post(social::mark_read))
+        .route("/ws", get(crate::hub::ws))
         // chunks
         .route("/chunks/missing", post(chunks::missing))
         .route("/chunks/{hash}", get(chunks::download).put(chunks::upload));
 
+    // Public files such as the app installer: <data>/downloads/*, no login needed.
+    let downloads = ServeDir::new(state.config.data_dir.join("downloads"));
+
     Router::new()
         .route("/", get(|| async { "Condensate server\n" }))
+        .nest_service("/download", downloads)
+        .route("/images/{id}", get(images::serve))
         .nest("/api/v1", api)
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())

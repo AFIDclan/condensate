@@ -12,12 +12,14 @@ use super::games::{summaries_where, Bind, HAS_VERSION};
 
 #[derive(FromRow)]
 pub struct UserRow {
-    id: i64,
-    username: String,
-    display_name: String,
-    bio: String,
-    is_admin: bool,
-    created_at: i64,
+    pub id: i64,
+    pub username: String,
+    pub display_name: String,
+    pub bio: String,
+    pub is_admin: bool,
+    pub created_at: i64,
+    pub avatar_image: Option<String>,
+    pub last_seen_at: i64,
 }
 
 impl From<UserRow> for User {
@@ -29,11 +31,12 @@ impl From<UserRow> for User {
             bio: r.bio,
             is_admin: r.is_admin,
             created_at: r.created_at,
+            avatar: r.avatar_image,
         }
     }
 }
 
-const USER_COLS: &str = "id, username, display_name, bio, is_admin, created_at";
+pub const USER_COLS: &str = "id, username, display_name, bio, is_admin, created_at, avatar_image, last_seen_at";
 
 async fn load_user(db: &sqlx::SqlitePool, id: i64) -> ApiResult<User> {
     let row: UserRow = sqlx::query_as(&format!("SELECT {USER_COLS} FROM users WHERE id = ?"))
@@ -170,6 +173,10 @@ pub async fn update_me(
             return Err(bad_request("bio must be at most 1000 characters"));
         }
         sqlx::query("UPDATE users SET bio = ? WHERE id = ?").bind(bio.trim()).bind(user.id).execute(&st.db).await?;
+    }
+    if let Some(avatar) = req.avatar_image {
+        let id = super::images::check_id(&st, &avatar).await?;
+        sqlx::query("UPDATE users SET avatar_image = ? WHERE id = ?").bind(id).bind(user.id).execute(&st.db).await?;
     }
     Ok(Json(load_user(&st.db, user.id).await?))
 }

@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use sqlx::SqlitePool;
 
 use crate::config::Config;
+use crate::hub::Hub;
 use crate::storage::Storage;
 
 #[derive(Clone)]
@@ -13,11 +14,12 @@ pub struct AppState {
     pub storage: Arc<Storage>,
     pub config: Arc<Config>,
     pub login_limiter: Arc<LoginLimiter>,
+    pub hub: Arc<Hub>,
 }
 
 impl AppState {
     pub fn new(db: SqlitePool, storage: Storage, config: Arc<Config>) -> Self {
-        Self { db, storage: Arc::new(storage), config, login_limiter: Arc::new(LoginLimiter::default()) }
+        Self { db, storage: Arc::new(storage), config, login_limiter: Arc::new(LoginLimiter::default()), hub: Arc::new(Hub::default()) }
     }
 }
 

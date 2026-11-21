@@ -1,4 +1,6 @@
+mod auth;
 mod config;
+mod setup;
 
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -11,12 +13,15 @@ use condensate_sdk::pull::{PullEvent, PullOptions};
 use condensate_sdk::push::{PushBuild, PushEvent, PushOptions};
 use condensate_sdk::Client;
 
-use crate::config::{ProjectFile, Saved};
+use condensate_sdk::login_store::{self, StoredLogin};
+
+use crate::config::ProjectFile;
 
 /// Condensate: share games with friends.
 ///
-/// Authentication comes from `condensate login`, or from the CONDENSATE_SERVER and
-/// CONDENSATE_TOKEN environment variables (handy for build agents with a publish token).
+/// Uses the same login as the Condensate desktop app. If you're not logged in, it opens the
+/// app so you can log in there. Build agents should set CONDENSATE_TOKEN (a publish token)
+/// and CONDENSATE_SERVER instead.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
@@ -46,9 +51,9 @@ enum Command {
         #[arg(long)]
         display_name: Option<String>,
     },
-    /// Log in and remember the session. Password from CONDENSATE_PASSWORD or a prompt.
+    /// Log in (also logs in the desktop app). Password from CONDENSATE_PASSWORD or a prompt.
     Login { username: String },
-    /// Forget the saved session
+    /// Log out (also logs out the desktop app)
     Logout,
     /// Show who you are logged in as
     Whoami,
@@ -77,6 +82,15 @@ enum Command {
     Launch { dir: PathBuf },
     /// Show a game's version history and changelogs
     Versions { game: String },
+    /// Installer support: add or remove the CLI from your PATH
+    #[command(hide = true, subcommand)]
+    Setup(SetupCmd),
+}
+
+#[derive(Subcommand)]
+enum SetupCmd {
+    AddToPath,
+    RemoveFromPath,
 }
 
 #[derive(Subcommand)]
@@ -118,7 +132,7 @@ enum GameCmd {
         #[arg(long)]
         visibility: Option<String>,
     },
-    /// Edit a game's store page
+    /// Edit a game's store page and artwork
     Edit {
         slug: String,
         #[arg(long)]
@@ -129,7 +143,17 @@ enum GameCmd {
         description: Option<String>,
         #[arg(long)]
         visibility: Option<String>,
+        /// Poster image (portrait, 2:3, e.g. 600x900 PNG/JPEG)
+        #[arg(long)]
+        cover: Option<PathBuf>,
+        /// Banner image (landscape, 16:9, e.g. 1920x1080 PNG/JPEG)
+        #[arg(long)]
+        banner: Option<PathBuf>,
     },
+    /// Delete one version of a game
+    DeleteVersion { slug: String, version: String },
+    /// Games you own, including unreleased ones
+    Mine,
     /// Show one game
     Info { slug: String },
     /// Search the store
@@ -175,39 +199,58 @@ async fn main() {
 }
 
 struct Ctx {
-    saved: Saved,
+    login: StoredLogin,
     server_override: Option<String>,
     token_override: Option<String>,
     json: bool,
 }
 
 impl Ctx {
-    fn server(&self, project: Option<&str>) -> Result<String> {
-        self.server_override
-            .clone()
-            .or_else(|| project.map(String::from))
-            .or_else(|| self.saved.server.clone())
-            .ok_or_else(|| anyhow!("no server configured: pass --server or set CONDENSATE_SERVER"))
+    fn server(&self, project: Option<&str>) -> Option<String> {
+        self.server_override.clone().or_else(|| project.map(String::from)).or_else(|| self.login.server.clone())
     }
 
-    fn client(&self) -> Result<Client> {
-        self.client_for(None)
+    async fn client(&self) -> Result<Client> {
+        self.client_for(None).await
     }
 
-    fn client_for(&self, project_server: Option<&str>) -> Result<Client> {
-        let server = self.server(project_server)?;
-        let token = self.token_override.clone().or_else(|| {
-            // Only reuse the saved session for the server it belongs to.
-            (self.saved.server.as_deref() == Some(server.as_str())).then(|| self.saved.token.clone()).flatten()
-        });
-        if token.is_none() {
-            bail!("not logged in: run `condensate login <username>` or set CONDENSATE_TOKEN");
+    /// An authenticated client: explicit token, else the shared app/CLI login, else (when a
+    /// person is at the keyboard) open the app and wait for them to log in.
+    async fn client_for(&self, project_server: Option<&str>) -> Result<Client> {
+        let wanted = self.server_override.clone().or_else(|| project_server.map(String::from));
+        if let Some(token) = &self.token_override {
+            let server = self.server(project_server).ok_or_else(|| anyhow!("CONDENSATE_TOKEN is set but no server: set CONDENSATE_SERVER"))?;
+            return Client::new(&server, Some(token.clone()));
         }
-        Client::new(&server, token)
+        let usable = |l: &StoredLogin| match (&l.token, &l.server) {
+            (Some(t), Some(s)) if wanted.as_deref().map_or(true, |w| auth::same_server(w, s)) => Some((s.clone(), t.clone())),
+            _ => None,
+        };
+        if let Some((server, token)) = usable(&self.login) {
+            return Client::new(&server, Some(token));
+        }
+        if self.login.token.is_some() {
+            bail!(
+                "you're logged in to {}, not {}; run `condensate login <username> --server {}`",
+                self.login.server.as_deref().unwrap_or("?"),
+                wanted.as_deref().unwrap_or("?"),
+                wanted.as_deref().unwrap_or("?")
+            );
+        }
+        if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+            if let Some(login) = auth::login_with_app().await? {
+                if let Some((server, token)) = usable(&login) {
+                    return Client::new(&server, Some(token));
+                }
+                bail!("the app logged in to {}, but this command wants {}", login.server.unwrap_or_default(), wanted.unwrap_or_default());
+            }
+        }
+        bail!("not logged in: log in to the Condensate app, run `condensate login <username>`, or set CONDENSATE_TOKEN")
     }
 
     fn anon_client(&self) -> Result<Client> {
-        Client::new(&self.server(None)?, None)
+        let server = self.server(None).ok_or_else(|| anyhow!("which server? pass --server https://..."))?;
+        Client::new(&server, None)
     }
 
     fn print<T: serde::Serialize>(&self, value: &T, human: impl FnOnce()) {
@@ -231,7 +274,7 @@ fn password(prompt: &str) -> Result<String> {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
-    let ctx = Ctx { saved: Saved::load()?, server_override: cli.server, token_override: cli.token, json: cli.json };
+    let ctx = Ctx { login: auth::current_login(), server_override: cli.server, token_override: cli.token, json: cli.json };
 
     match cli.command {
         Command::Register { username, invite, display_name } => {
@@ -251,25 +294,24 @@ async fn run() -> Result<()> {
             ctx.print(&resp.user, || println!("Logged in as {}", resp.user.username));
         }
         Command::Logout => {
-            if let Ok(client) = ctx.client() {
-                let _ = client.logout().await;
+            if let (Some(server), Some(token)) = (&ctx.login.server, &ctx.login.token) {
+                let _ = Client::new(server, Some(token.clone()))?.logout().await;
             }
-            let mut saved = ctx.saved;
-            saved.token = None;
-            saved.save()?;
-            println!("Logged out");
+            login_store::save(&StoredLogin { token: None, ..ctx.login.clone() })?;
+            auth::clear_legacy();
+            println!("Logged out (here and in the desktop app)");
         }
         Command::Whoami => {
-            let client = ctx.client()?;
+            let client = ctx.client().await?;
             let me = client.me().await?;
             ctx.print(&me, || println!("{} ({}) on {}", me.username, me.display_name, client.server()));
         }
         Command::Invite(InviteCmd::Create) => {
-            let invite = ctx.client()?.create_invite().await?;
+            let invite = ctx.client().await?.create_invite().await?;
             ctx.print(&invite, || println!("{}", invite.code));
         }
         Command::Invite(InviteCmd::List) => {
-            let invites = ctx.client()?.list_invites().await?;
+            let invites = ctx.client().await?.list_invites().await?;
             ctx.print(&invites, || {
                 for i in &invites {
                     match &i.used_by {
@@ -280,14 +322,14 @@ async fn run() -> Result<()> {
             });
         }
         Command::Token(TokenCmd::Create { name, game }) => {
-            let created = ctx.client()?.create_token(&CreateTokenRequest { name, game }).await?;
+            let created = ctx.client().await?.create_token(&CreateTokenRequest { name, game }).await?;
             ctx.print(&created, || {
                 println!("{}", created.token);
                 eprintln!("Save this now; it is not shown again. Use it as CONDENSATE_TOKEN.");
             });
         }
         Command::Token(TokenCmd::List) => {
-            let tokens = ctx.client()?.list_tokens().await?;
+            let tokens = ctx.client().await?.list_tokens().await?;
             ctx.print(&tokens, || {
                 for t in &tokens {
                     let scope = t.game.as_deref().map(|g| format!(" game={g}")).unwrap_or_default();
@@ -296,7 +338,7 @@ async fn run() -> Result<()> {
             });
         }
         Command::Token(TokenCmd::Revoke { id }) => {
-            ctx.client()?.revoke_token(id).await?;
+            ctx.client().await?.revoke_token(id).await?;
             println!("Revoked token {id}");
         }
         Command::Game(cmd) => game_cmd(&ctx, cmd).await?,
@@ -305,7 +347,7 @@ async fn run() -> Result<()> {
             let platform = platform
                 .or_else(|| platform::current().map(String::from))
                 .ok_or_else(|| anyhow!("unsupported platform; pass --platform"))?;
-            let client = ctx.client()?;
+            let client = ctx.client().await?;
             let quiet = ctx.json;
             let report = condensate_sdk::pull::pull(
                 &client,
@@ -338,8 +380,10 @@ async fn run() -> Result<()> {
                 bail!("game exited with {status}");
             }
         }
+        Command::Setup(SetupCmd::AddToPath) => setup::add_to_path()?,
+        Command::Setup(SetupCmd::RemoveFromPath) => setup::remove_from_path()?,
         Command::Versions { game } => {
-            let versions = ctx.client()?.versions(&game).await?;
+            let versions = ctx.client().await?.versions(&game).await?;
             ctx.print(&versions, || {
                 for v in &versions {
                     println!("{}  [{}]  {}", v.version, v.platforms.join(", "), v.changelog);
@@ -351,24 +395,41 @@ async fn run() -> Result<()> {
 }
 
 fn save_session(client: &Client, resp: &AuthResponse) -> Result<()> {
-    let saved = Saved {
+    auth::clear_legacy();
+    login_store::save(&StoredLogin {
         server: Some(client.server().to_string()),
         token: Some(resp.token.clone()),
         username: Some(resp.user.username.clone()),
-    };
-    saved.save()
+    })
 }
 
 async fn game_cmd(ctx: &Ctx, cmd: GameCmd) -> Result<()> {
-    let client = ctx.client()?;
+    let client = ctx.client().await?;
     match cmd {
         GameCmd::Create { slug, title, summary, description, visibility } => {
             let game = client.create_game(&CreateGameRequest { slug, title, summary, description, visibility }).await?;
             ctx.print(&game, || println!("Created {} ({})", game.summary.title, game.summary.slug));
         }
-        GameCmd::Edit { slug, title, summary, description, visibility } => {
-            let game = client.update_game(&slug, &UpdateGameRequest { title, summary, description, visibility }).await?;
+        GameCmd::Edit { slug, title, summary, description, visibility, cover, banner } => {
+            let cover_image = match cover {
+                Some(p) => Some(upload_image(&client, &p).await?),
+                None => None,
+            };
+            let banner_image = match banner {
+                Some(p) => Some(upload_image(&client, &p).await?),
+                None => None,
+            };
+            let req = UpdateGameRequest { title, summary, description, visibility, cover_image, banner_image };
+            let game = client.update_game(&slug, &req).await?;
             ctx.print(&game, || println!("Updated {}", game.summary.slug));
+        }
+        GameCmd::DeleteVersion { slug, version } => {
+            client.delete_version(&slug, &version).await?;
+            println!("Deleted {slug} {version}");
+        }
+        GameCmd::Mine => {
+            let games = client.my_games().await?;
+            ctx.print(&games, || print_games(&games));
         }
         GameCmd::Info { slug } => {
             let game = client.game(&slug).await?;
@@ -409,6 +470,37 @@ async fn game_cmd(ctx: &Ctx, cmd: GameCmd) -> Result<()> {
     Ok(())
 }
 
+async fn upload_image(client: &Client, path: &std::path::Path) -> Result<String> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    client.upload_image(bytes).await.with_context(|| format!("uploading {}", path.display()))
+}
+
+/// Upload the project's artwork and point the game at it if it changed.
+async fn sync_art(client: &Client, game: &str, art: &config::ProjectArt) -> Result<()> {
+    if art.cover.is_none() && art.banner.is_none() {
+        return Ok(());
+    }
+    let current = client.game(game).await?.summary;
+    let mut req = UpdateGameRequest::default();
+    if let Some(path) = &art.cover {
+        let id = upload_image(client, path).await?;
+        if current.cover.as_deref() != Some(id.as_str()) {
+            req.cover_image = Some(id);
+        }
+    }
+    if let Some(path) = &art.banner {
+        let id = upload_image(client, path).await?;
+        if current.banner.as_deref() != Some(id.as_str()) {
+            req.banner_image = Some(id);
+        }
+    }
+    if req.cover_image.is_some() || req.banner_image.is_some() {
+        client.update_game(game, &req).await?;
+        eprintln!("Updated artwork");
+    }
+    Ok(())
+}
+
 fn print_games(games: &[GameSummary]) {
     for g in games {
         println!(
@@ -422,6 +514,7 @@ fn print_games(games: &[GameSummary]) {
 }
 
 async fn push_cmd(ctx: &Ctx, args: PushArgs) -> Result<()> {
+    let mut art = config::ProjectArt::default();
     let (game, builds, project_server) = if let Some(dir) = args.dir {
         let game = args.game.ok_or_else(|| anyhow!("--dir needs --game"))?;
         let exe = args.exe.ok_or_else(|| anyhow!("--dir needs --exe"))?;
@@ -445,10 +538,12 @@ async fn push_cmd(ctx: &Ctx, args: PushArgs) -> Result<()> {
                 launch: LaunchConfig { exe: b.exe, args: b.args, workdir: b.workdir },
             })
             .collect::<Vec<_>>();
+        art = project.art;
         (args.game.unwrap_or(project.game), builds, project.server)
     };
 
-    let client = ctx.client_for(project_server.as_deref())?;
+    let client = ctx.client_for(project_server.as_deref()).await?;
+    sync_art(&client, &game, &art).await?;
     let quiet = ctx.json;
     let report = condensate_sdk::push::push(
         &client,

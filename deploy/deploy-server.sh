@@ -11,10 +11,17 @@ cd ~/condensate
 ~/.cargo/bin/cargo build --release -p condensate-server -p condensate-cli
 mkdir -p ~/condensate-server/bin ~/condensate-server/data
 install -m 755 target/release/condensate-server target/release/condensate ~/condensate-server/bin/
-if ! cmp -s deploy/condensate.service /etc/systemd/system/condensate.service; then
-  sudo install -m 644 deploy/condensate.service /etc/systemd/system/condensate.service
+changed=0
+for unit in condensate.service condensate-maintenance.service condensate-maintenance.timer; do
+  if ! cmp -s "deploy/$unit" "/etc/systemd/system/$unit"; then
+    sudo install -m 644 "deploy/$unit" "/etc/systemd/system/$unit"
+    changed=1
+  fi
+done
+if [ "$changed" = 1 ]; then
   sudo systemctl daemon-reload
   sudo systemctl enable condensate
+  sudo systemctl enable --now condensate-maintenance.timer
 fi
 sudo systemctl restart condensate
 sleep 1

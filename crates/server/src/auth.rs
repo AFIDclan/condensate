@@ -134,43 +134,48 @@ impl FromRequestParts<AppState> for AuthUser {
             .map(str::trim)
             .ok_or(ApiError::Unauthorized)?;
 
-        let row: Option<TokenRow> = sqlx::query_as(
-            "SELECT t.id, t.user_id, t.kind, t.game_id, t.expires_at, t.last_used_at, u.username, u.is_admin
-             FROM tokens t JOIN users u ON u.id = t.user_id
-             WHERE t.token_hash = ?",
-        )
-        .bind(token_hash(token))
-        .fetch_optional(&state.db)
-        .await?;
-        let Some((token_id, user_id, kind, game_id, expires_at, last_used_at, username, is_admin)) = row else {
-            return Err(ApiError::Unauthorized);
-        };
-
-        let t = now();
-        if expires_at.is_some_and(|e| e < t) {
-            return Err(ApiError::Unauthorized);
-        }
-        // Touch at most once an hour so chunk downloads don't turn into a stream of writes.
-        if t - last_used_at > 3600 {
-            sqlx::query(
-                "UPDATE tokens SET last_used_at = ?,
-                 expires_at = CASE WHEN kind = 'session' THEN ? ELSE expires_at END
-                 WHERE id = ?",
-            )
-            .bind(t)
-            .bind(t + SESSION_TTL)
-            .bind(token_id)
-            .execute(&state.db)
-            .await?;
-        }
-
-        Ok(AuthUser {
-            id: user_id,
-            username,
-            is_admin,
-            token_id,
-            kind: if kind == "publish" { TokenKind::Publish } else { TokenKind::Session },
-            game_scope: game_id,
-        })
+        authenticate(state, token).await
     }
+}
+
+/// Resolve a bearer token to its user (also used by the WebSocket endpoint).
+pub async fn authenticate(state: &AppState, token: &str) -> Result<AuthUser, ApiError> {
+    let row: Option<TokenRow> = sqlx::query_as(
+        "SELECT t.id, t.user_id, t.kind, t.game_id, t.expires_at, t.last_used_at, u.username, u.is_admin
+         FROM tokens t JOIN users u ON u.id = t.user_id
+         WHERE t.token_hash = ?",
+    )
+    .bind(token_hash(token))
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((token_id, user_id, kind, game_id, expires_at, last_used_at, username, is_admin)) = row else {
+        return Err(ApiError::Unauthorized);
+    };
+
+    let t = now();
+    if expires_at.is_some_and(|e| e < t) {
+        return Err(ApiError::Unauthorized);
+    }
+    // Touch at most once an hour so chunk downloads don't turn into a stream of writes.
+    if t - last_used_at > 3600 {
+        sqlx::query(
+            "UPDATE tokens SET last_used_at = ?,
+             expires_at = CASE WHEN kind = 'session' THEN ? ELSE expires_at END
+             WHERE id = ?",
+        )
+        .bind(t)
+        .bind(t + SESSION_TTL)
+        .bind(token_id)
+        .execute(&state.db)
+        .await?;
+    }
+
+    Ok(AuthUser {
+        id: user_id,
+        username,
+        is_admin,
+        token_id,
+        kind: if kind == "publish" { TokenKind::Publish } else { TokenKind::Session },
+        game_scope: game_id,
+    })
 }

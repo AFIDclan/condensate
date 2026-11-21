@@ -42,7 +42,8 @@ pub struct Session {
 }
 
 #[tauri::command]
-pub async fn session(state: State<'_, AppState>) -> CmdResult<Session> {
+pub async fn session(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Session> {
+    state.reload();
     let server = state.server();
     let user = match state.client() {
         Ok(client) => match client.me().await {
@@ -55,6 +56,9 @@ pub async fn session(state: State<'_, AppState>) -> CmdResult<Session> {
         },
         Err(_) => None,
     };
+    if user.is_some() {
+        crate::realtime::start(&app);
+    }
     Ok(Session {
         server,
         user,
@@ -105,7 +109,8 @@ pub async fn register(
 }
 
 #[tauri::command]
-pub async fn logout(state: State<'_, AppState>) -> CmdResult<()> {
+pub async fn logout(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    crate::realtime::stop(&app);
     if let Ok(client) = state.client() {
         let _ = client.logout().await;
     }
@@ -129,6 +134,8 @@ pub struct LibraryItem {
     update_available: bool,
     job: Option<Job>,
     running: bool,
+    playtime_seconds: i64,
+    last_played_at: Option<i64>,
 }
 
 #[tauri::command]
@@ -155,6 +162,8 @@ pub async fn library(state: State<'_, AppState>) -> CmdResult<Vec<LibraryItem>> 
                 update_available,
                 job: jobs.get(&e.game.slug).cloned(),
                 running: running.contains_key(&e.game.slug),
+                playtime_seconds: e.playtime_seconds,
+                last_played_at: e.last_played_at,
                 latest: e.latest,
                 game: e.game,
             }
@@ -280,9 +289,22 @@ pub async fn play(app: AppHandle, state: State<'_, AppState>, slug: String) -> C
     let mut child = condensate_sdk::launch::launch(&dir).map_err(err)?;
     state.running.lock().unwrap().insert(slug.clone(), child.id());
     let _ = app.emit("game-started", &slug);
+    crate::realtime::send(&app, WsCommand::Playing { game: Some(slug.clone()) });
+    let client = state.client().ok();
+    let started = std::time::Instant::now();
     std::thread::spawn(move || {
         let code = child.wait().ok().and_then(|s| s.code());
-        app.state::<AppState>().running.lock().unwrap().remove(&slug);
+        let seconds = started.elapsed().as_secs() as i64;
+        let state = app.state::<AppState>();
+        state.running.lock().unwrap().remove(&slug);
+        let still_playing = state.running.lock().unwrap().keys().next().cloned();
+        crate::realtime::send(&app, WsCommand::Playing { game: still_playing });
+        if let Some(client) = client {
+            let slug = slug.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = client.report_playtime(&slug, seconds).await;
+            });
+        }
         let _ = app.emit("game-exited", GameExited { slug, code });
     });
     Ok(())
@@ -307,6 +329,130 @@ pub async fn list_invites(state: State<'_, AppState>) -> CmdResult<Vec<Invite>> 
 }
 
 #[tauri::command]
-pub async fn update_profile(state: State<'_, AppState>, display_name: Option<String>, bio: Option<String>) -> CmdResult<User> {
-    state.client()?.update_me(&UpdateProfileRequest { display_name, bio }).await.map_err(err)
+pub async fn update_profile(
+    state: State<'_, AppState>,
+    display_name: Option<String>,
+    bio: Option<String>,
+    avatar_image: Option<String>,
+) -> CmdResult<User> {
+    state.client()?.update_me(&UpdateProfileRequest { display_name, bio, avatar_image }).await.map_err(err)
+}
+
+/// Upload an image sent as the raw request body (an ArrayBuffer from the UI); returns its id.
+#[tauri::command]
+pub async fn upload_image(state: State<'_, AppState>, request: tauri::ipc::Request<'_>) -> CmdResult<String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("expected raw image bytes".into());
+    };
+    state.client()?.upload_image(bytes.clone()).await.map_err(err)
+}
+
+// ---- friends & chat ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn friends(state: State<'_, AppState>) -> CmdResult<FriendsResponse> {
+    state.client()?.friends().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn search_users(state: State<'_, AppState>, query: String) -> CmdResult<Vec<User>> {
+    state.client()?.search_users(&query).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn add_friend(state: State<'_, AppState>, username: String) -> CmdResult<()> {
+    state.client()?.add_friend(&username).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn remove_friend(state: State<'_, AppState>, username: String) -> CmdResult<()> {
+    state.client()?.remove_friend(&username).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn conversations(state: State<'_, AppState>) -> CmdResult<Vec<Conversation>> {
+    state.client()?.conversations().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn messages(state: State<'_, AppState>, username: String, before: Option<i64>) -> CmdResult<Vec<ChatMessage>> {
+    state.client()?.messages(&username, before).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn send_message(state: State<'_, AppState>, username: String, body: String) -> CmdResult<ChatMessage> {
+    state.client()?.send_message(&username, &body).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn mark_read(state: State<'_, AppState>, username: String) -> CmdResult<()> {
+    state.client()?.mark_read(&username).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn profile(state: State<'_, AppState>, username: String) -> CmdResult<UserProfile> {
+    state.client()?.profile(&username).await.map_err(err)
+}
+
+// ---- studio (your games) ------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn my_games(state: State<'_, AppState>) -> CmdResult<Vec<GameSummary>> {
+    state.client()?.my_games().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn create_game(state: State<'_, AppState>, slug: String, title: String) -> CmdResult<GameDetail> {
+    let req = CreateGameRequest { slug, title, summary: None, description: None, visibility: None };
+    state.client()?.create_game(&req).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn update_game(state: State<'_, AppState>, slug: String, changes: UpdateGameRequest) -> CmdResult<GameDetail> {
+    state.client()?.update_game(&slug, &changes).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn delete_version(state: State<'_, AppState>, slug: String, version: String) -> CmdResult<()> {
+    state.client()?.delete_version(&slug, &version).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn list_tokens(state: State<'_, AppState>) -> CmdResult<Vec<TokenInfo>> {
+    state.client()?.list_tokens().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn create_token(state: State<'_, AppState>, name: String, game: Option<String>) -> CmdResult<CreatedToken> {
+    state.client()?.create_token(&CreateTokenRequest { name, game }).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn revoke_token(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    state.client()?.revoke_token(id).await.map_err(err)
+}
+
+// ---- settings ---------------------------------------------------------------------------------
+
+/// Move the games folder, taking installed games along.
+#[tauri::command]
+pub async fn set_library_dir(state: State<'_, AppState>, path: String) -> CmdResult<String> {
+    if !state.jobs.lock().unwrap().is_empty() || !state.running.lock().unwrap().is_empty() {
+        return Err("wait for downloads to finish and close running games first".into());
+    }
+    let old = state.library_dir();
+    let new = std::path::PathBuf::from(&path);
+    if new == old {
+        return Ok(path);
+    }
+    if new.starts_with(&old) {
+        return Err("pick a folder outside the current games folder".into());
+    }
+    let (o, n) = (old.clone(), new.clone());
+    tauri::async_runtime::spawn_blocking(move || crate::state::move_games(&o, &n))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("couldn't move games: {e:#}"))?;
+    state.update_settings(|s| s.library_dir = Some(new))?;
+    Ok(path)
 }

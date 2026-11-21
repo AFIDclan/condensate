@@ -11,17 +11,21 @@ pub const DEFAULT_SERVER: &str = "https://oort-cloud.tail4b4a9d.ts.net";
 
 /// Saved to `<app config dir>/settings.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub server: String,
     pub token: Option<String>,
     pub username: Option<String>,
     /// Where games are installed. Defaults to `<app local data>/games`.
     pub library_dir: Option<PathBuf>,
+    /// Where this app was launched from, so the CLI can open it to log in. An AppImage has no
+    /// fixed install folder for the CLI to look in.
+    pub app_path: Option<PathBuf>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { server: DEFAULT_SERVER.into(), token: None, username: None, library_dir: None }
+        Self { server: DEFAULT_SERVER.into(), token: None, username: None, library_dir: None, app_path: None }
     }
 }
 
@@ -43,6 +47,8 @@ pub struct AppState {
     pub jobs: Mutex<HashMap<String, Job>>,
     /// slug -> process id of running games.
     pub running: Mutex<HashMap<String, u32>>,
+    /// The live connection's generation and outbox (see realtime.rs).
+    pub realtime: Mutex<Option<(u64, tokio::sync::mpsc::UnboundedSender<condensate_core::api::WsCommand>)>>,
 }
 
 impl AppState {
@@ -58,6 +64,14 @@ impl AppState {
             default_library: data_dir.join("games"),
             jobs: Mutex::new(HashMap::new()),
             running: Mutex::new(HashMap::new()),
+            realtime: Mutex::new(None),
+        }
+    }
+
+    /// Re-read settings from disk: the CLI shares this file and may have logged in or out.
+    pub fn reload(&self) {
+        if let Some(fresh) = std::fs::read(&self.settings_path).ok().and_then(|b| serde_json::from_slice::<Settings>(&b).ok()) {
+            *self.settings.lock().unwrap() = fresh;
         }
     }
 
@@ -69,6 +83,15 @@ impl AppState {
         }
         let json = serde_json::to_vec_pretty(&*s).map_err(|e| e.to_string())?;
         std::fs::write(&self.settings_path, json).map_err(|e| e.to_string())
+    }
+
+    /// Record where the app lives (see `Settings::app_path`).
+    pub fn record_app_path(&self) {
+        let path = std::env::var_os("APPIMAGE").map(PathBuf::from).or_else(|| std::env::current_exe().ok());
+        let changed = path.is_some() && self.settings.lock().unwrap().app_path != path;
+        if changed {
+            let _ = self.update_settings(|s| s.app_path = path);
+        }
     }
 
     pub fn server(&self) -> String {
@@ -89,4 +112,40 @@ impl AppState {
     pub fn game_dir(&self, slug: &str) -> PathBuf {
         self.library_dir().join(slug)
     }
+}
+
+/// Move every installed game from one games folder to another (rename when possible, copy
+/// across drives otherwise). Folders that aren't Condensate installs are left alone.
+pub fn move_games(from: &Path, to: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(to)?;
+    let Ok(entries) = std::fs::read_dir(from) else { return Ok(()) };
+    for entry in entries.flatten() {
+        let src = entry.path();
+        if !src.join(condensate_core::META_DIR).join("installed.json").is_file() {
+            continue;
+        }
+        let dest = to.join(entry.file_name());
+        if dest.exists() {
+            anyhow::bail!("{} already exists", dest.display());
+        }
+        if std::fs::rename(&src, &dest).is_err() {
+            copy_dir(&src, &dest)?;
+            std::fs::remove_dir_all(&src)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), dest)?;
+        }
+    }
+    Ok(())
 }

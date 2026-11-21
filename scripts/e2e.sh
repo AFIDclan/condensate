@@ -81,4 +81,31 @@ if CONDENSATE_TOKEN="$TOKEN" XDG_CONFIG_HOME="$WORK/agent" cs invite create 2>/d
 fi
 cs versions demo
 
+echo "== artwork"
+printf '\x89PNG\r\n\x1a\nnot-really-a-png-but-sniffable' >"$WORK/cover.png"
+cs game edit demo --cover "$WORK/cover.png" >/dev/null
+COVER=$(cs --json game info demo | python3 -c 'import sys,json; print(json.load(sys.stdin)["cover"])')
+curl -sf "$CONDENSATE_SERVER/images/$COVER" | cmp - "$WORK/cover.png"
+
+echo "== friends, messages, playtime"
+tok() { python3 -c 'import sys,json; print(json.load(open(sys.argv[1]))["token"])' "$1/com.condensate.app/settings.json"; }
+ALICE=$(tok "$XDG_CONFIG_HOME"); BOB=$(tok "$WORK/bob")
+api() { local who=$1 method=$2 path=$3; shift 3; curl -sf -X "$method" -H "Authorization: Bearer $who" -H 'content-type: application/json' "$CONDENSATE_SERVER/api/v1$path" "$@"; }
+api "$ALICE" PUT /friends/bob >/dev/null
+api "$BOB" GET /friends | grep -q '"incoming":\[{' || { echo "FAIL: bob has no incoming request"; exit 1; }
+if api "$ALICE" POST /messages/bob -d '{"body":"too early"}' >/dev/null 2>&1; then echo "FAIL: messaged a non-friend"; exit 1; fi
+api "$BOB" PUT /friends/alice >/dev/null
+api "$ALICE" POST /messages/bob -d '{"body":"want to play demo?"}' >/dev/null
+api "$BOB" GET /conversations | grep -q '"unread":1' || { echo "FAIL: bob should have 1 unread"; exit 1; }
+api "$BOB" POST /messages/alice/read -d '{}' >/dev/null
+api "$BOB" GET /conversations | grep -q '"unread":0' || { echo "FAIL: read receipt"; exit 1; }
+api "$BOB" GET /messages/alice | grep -q 'want to play demo' || { echo "FAIL: history"; exit 1; }
+api "$BOB" POST /games/demo/playtime -d '{"seconds":600}' >/dev/null
+api "$BOB" GET "/library?platform=linux-x64" | grep -q '"playtime_seconds":600' || { echo "FAIL: playtime"; exit 1; }
+
+echo "== delete version + gc"
+cs game delete-version demo 0.1.0
+cs versions demo | grep -q '^0.1.0' && { echo "FAIL: version not deleted"; exit 1; }
+CONDENSATE_DATA_DIR="$WORK/server" "$BIN/condensate-server" gc --dry-run
+
 echo "ALL E2E CHECKS PASSED"

@@ -1,5 +1,6 @@
 pub mod client;
 pub mod launch;
+pub mod login_store;
 pub mod pull;
 pub mod push;
 

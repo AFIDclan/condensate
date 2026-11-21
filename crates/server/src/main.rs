@@ -2,6 +2,8 @@ mod auth;
 mod config;
 mod db;
 mod error;
+mod housekeeping;
+mod hub;
 mod routes;
 mod state;
 mod storage;
@@ -34,6 +36,17 @@ enum Command {
     Invite,
     /// Set a new random password for a user and sign out all of their sessions.
     ResetPassword { username: String },
+    /// Delete stored chunks and images that nothing references any more.
+    Gc {
+        /// Only report what would be deleted
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Snapshot the database into <data>/backups, keeping the newest N.
+    Backup {
+        #[arg(long, default_value_t = 14)]
+        keep: usize,
+    },
 }
 
 #[tokio::main]
@@ -88,6 +101,8 @@ async fn main() -> Result<()> {
             .await?;
             println!("New password for {username}: {password}");
         }
+        Command::Gc { dry_run } => housekeeping::gc(&db, &Storage::new(&config.data_dir)?, dry_run).await?,
+        Command::Backup { keep } => housekeeping::backup(&db, &config.data_dir, keep).await?,
     }
     Ok(())
 }

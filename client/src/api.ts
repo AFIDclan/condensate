@@ -7,6 +7,7 @@ export interface User {
   bio: string;
   is_admin: boolean;
   created_at: number;
+  avatar: string | null;
 }
 
 export interface Session {
@@ -26,6 +27,8 @@ export interface GameSummary {
   platforms: string[];
   updated_at: number;
   in_library: boolean;
+  cover: string | null;
+  banner: string | null;
 }
 
 export interface VersionInfo {
@@ -63,6 +66,8 @@ export interface LibraryItem {
   update_available: boolean;
   job: Job | null;
   running: boolean;
+  playtime_seconds: number;
+  last_played_at: number | null;
 }
 
 export interface PullReport {
@@ -89,6 +94,62 @@ export interface Invite {
   used_at: number | null;
 }
 
+export interface Presence {
+  status: "online" | "in_game" | "offline";
+  game: { slug: string; title: string } | null;
+  last_seen_at: number;
+}
+
+export interface Friend {
+  user: User;
+  presence: Presence;
+  since: number;
+}
+
+export interface FriendsResponse {
+  friends: Friend[];
+  incoming: User[];
+  outgoing: User[];
+}
+
+export interface ChatMessage {
+  id: number;
+  from: string;
+  to: string;
+  body: string;
+  created_at: number;
+  read_at: number | null;
+}
+
+export interface Conversation {
+  user: User;
+  last: ChatMessage | null;
+  unread: number;
+}
+
+export type WsEvent =
+  | { type: "presence"; user: string; presence: Presence }
+  | { type: "message"; message: ChatMessage }
+  | { type: "friends_changed" };
+
+export interface TokenInfo {
+  id: number;
+  kind: string;
+  name: string;
+  game: string | null;
+  created_at: number;
+  last_used_at: number;
+}
+
+export interface GameChanges {
+  title?: string;
+  summary?: string;
+  description?: string;
+  visibility?: string;
+  cover_image?: string;
+  banner_image?: string;
+}
+
 export const api = {
   session: () => invoke<Session>("session"),
   login: (server: string, username: string, password: string) =>
@@ -107,9 +168,42 @@ export const api = {
   openGameFolder: (slug: string) => invoke<void>("open_game_folder", { slug }),
   createInvite: () => invoke<Invite>("create_invite"),
   listInvites: () => invoke<Invite[]>("list_invites"),
-  updateProfile: (displayName: string | null, bio: string | null) =>
-    invoke<User>("update_profile", { displayName, bio }),
+  updateProfile: (displayName: string | null, bio: string | null, avatarImage: string | null = null) =>
+    invoke<User>("update_profile", { displayName, bio, avatarImage }),
+  uploadImage: (bytes: ArrayBuffer) => invoke<string>("upload_image", bytes),
+  friends: () => invoke<FriendsResponse>("friends"),
+  searchUsers: (query: string) => invoke<User[]>("search_users", { query }),
+  addFriend: (username: string) => invoke<void>("add_friend", { username }),
+  removeFriend: (username: string) => invoke<void>("remove_friend", { username }),
+  conversations: () => invoke<Conversation[]>("conversations"),
+  messages: (username: string, before?: number) => invoke<ChatMessage[]>("messages", { username, before: before ?? null }),
+  sendMessage: (username: string, body: string) => invoke<ChatMessage>("send_message", { username, body }),
+  markRead: (username: string) => invoke<void>("mark_read", { username }),
+  myGames: () => invoke<GameSummary[]>("my_games"),
+  createGame: (slug: string, title: string) => invoke<GameDetail>("create_game", { slug, title }),
+  updateGame: (slug: string, changes: GameChanges) => invoke<GameDetail>("update_game", { slug, changes }),
+  deleteVersion: (slug: string, version: string) => invoke<void>("delete_version", { slug, version }),
+  listTokens: () => invoke<TokenInfo[]>("list_tokens"),
+  createToken: (name: string, game: string | null) => invoke<{ token: string; info: TokenInfo }>("create_token", { name, game }),
+  revokeToken: (id: number) => invoke<void>("revoke_token", { id }),
+  setLibraryDir: (path: string) => invoke<string>("set_library_dir", { path }),
 };
+
+// Image URLs need the server address; set once the session is known.
+let serverBase = "";
+export function setServer(server: string) {
+  serverBase = server.replace(/\/+$/, "");
+}
+export function imageUrl(id: string | null | undefined): string | null {
+  return id && serverBase ? `${serverBase}/images/${id}` : null;
+}
+
+export function formatPlaytime(seconds: number): string {
+  if (seconds < 60) return seconds > 0 ? "under a minute" : "never played";
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min`;
+  const h = seconds / 3600;
+  return `${h < 10 ? h.toFixed(1) : Math.round(h)} h`;
+}
 
 const NOT_LOGGED_IN = "NOT_LOGGED_IN";
 export const LOGGED_OUT_EVENT = "condensate:logged-out";
@@ -146,11 +240,4 @@ export function timeAgo(unixSeconds: number): string {
 
 export function platformLabel(p: string): string {
   return p === "windows-x64" ? "Windows" : p === "linux-x64" ? "Linux" : p;
-}
-
-/** Stable hue per game so covers are recognizable before games have art. */
-export function gameHue(slug: string): number {
-  let h = 0;
-  for (const c of slug) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return h % 360;
 }
