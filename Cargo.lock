@@ -786,6 +786,7 @@ dependencies = [
  "condensate-core",
  "condensate-sdk",
  "futures",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "tauri",

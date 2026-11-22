@@ -1,4 +1,5 @@
 mod commands;
+mod game_api;
 mod realtime;
 mod state;
 
@@ -27,6 +28,7 @@ pub fn run() {
             let state = state::AppState::load(&config_dir, &data_dir);
             state.record_app_path();
             app.manage(state);
+            app.manage(game_api::start(app.handle(), &config_dir)?);
             #[cfg(target_os = "linux")]
             std::thread::spawn(install_cli_from_appimage);
             // Launched at sign-in ("Start with Windows"): stay out of the way.
@@ -50,6 +52,7 @@ pub fn run() {
             commands::install,
             commands::uninstall,
             commands::play,
+            commands::join_lobby,
             commands::open_game_folder,
             commands::create_invite,
             commands::list_invites,

@@ -11,6 +11,7 @@ pub mod chunk;
 pub mod install;
 pub mod manifest;
 pub mod platform;
+pub mod play;
 pub mod scan;
 
 pub use manifest::{ChunkRef, FileEntry, LaunchConfig, Manifest};

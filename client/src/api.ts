@@ -94,10 +94,19 @@ export interface Invite {
   used_at: number | null;
 }
 
+export interface PresenceLobby {
+  id: string;
+  game: { slug: string; title: string };
+  members: number;
+  max_members: number;
+}
+
 export interface Presence {
   status: "online" | "in_game" | "offline";
   game: { slug: string; title: string } | null;
   last_seen_at: number;
+  /** A multiplayer lobby of theirs you can join. */
+  lobby: PresenceLobby | null;
 }
 
 export interface Friend {
@@ -130,7 +139,8 @@ export interface Conversation {
 export type WsEvent =
   | { type: "presence"; user: string; presence: Presence }
   | { type: "message"; message: ChatMessage }
-  | { type: "friends_changed" };
+  | { type: "friends_changed" }
+  | { type: "lobby_invite"; from: string; from_name: string; lobby: PresenceLobby };
 
 export interface TokenInfo {
   id: number;
@@ -165,6 +175,7 @@ export const api = {
   install: (slug: string) => invoke<void>("install", { slug }),
   uninstall: (slug: string) => invoke<void>("uninstall", { slug }),
   play: (slug: string) => invoke<void>("play", { slug }),
+  joinLobby: (slug: string, lobby: string) => invoke<void>("join_lobby", { slug, lobby }),
   openGameFolder: (slug: string) => invoke<void>("open_game_folder", { slug }),
   createInvite: () => invoke<Invite>("create_invite"),
   listInvites: () => invoke<Invite[]>("list_invites"),

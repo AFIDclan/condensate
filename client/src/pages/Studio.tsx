@@ -324,6 +324,14 @@ Only changed data is uploaded, so publishing again after a small fix is quick.
 - condensate game delete-version ${slug} <version>  (remove a broken release; players get the newest remaining one)
 - Put --json after \`condensate\` for machine-readable output, e.g. condensate --json push -m "..."
 
+## Multiplayer (only if I ask for it; Godot 4.3+)
+Condensate provides lobbies, friend invites and the networking, so the game needs no server of its own.
+1. Download ${server}/download/condensate-godot.zip and unzip it into the Godot project (it contains addons/condensate). Read addons/condensate/README.md for the full API.
+2. Enable the Condensate plugin, and set the project setting condensate/game_id to "${slug}".
+3. Host: await Condensate.create_lobby(), then multiplayer.multiplayer_peer = Condensate.create_peer(). Join: await Condensate.join_lobby(id), then create_peer() the same way.
+4. Connect Condensate.join_requested(lobby_id) to the join code: it fires when the player clicks Join on a friend or accepts an invite in Condensate.
+The host is peer 1, as with ENet, so RPCs, MultiplayerSpawner and MultiplayerSynchronizer work as usual.
+
 ## If something fails
 - "not logged in": ask me to log in to the Condensate app, then run the command again.
 - "launch executable ... is not part of the build": exe must be a path inside dir.

@@ -8,7 +8,7 @@ use std::time::Duration;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::response::Response;
-use condensate_core::api::{Presence, PresenceGame, WsCommand, WsEvent};
+use condensate_core::api::{Presence, PresenceGame, PresenceLobby, WsCommand, WsEvent};
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -27,6 +27,8 @@ pub struct Hub {
 struct Inner {
     conns: HashMap<i64, Vec<(u64, UnboundedSender<String>)>>,
     playing: HashMap<i64, PresenceGame>,
+    /// A lobby each user is in that their friends can join (kept by play.rs).
+    lobby: HashMap<i64, PresenceLobby>,
     next_id: u64,
 }
 
@@ -67,14 +69,30 @@ impl Hub {
         };
     }
 
+    /// Returns true when it changed.
+    pub fn set_lobby(&self, user: i64, lobby: Option<PresenceLobby>) -> bool {
+        let mut g = self.inner.lock().unwrap();
+        if g.lobby.get(&user) == lobby.as_ref() {
+            return false;
+        }
+        match lobby {
+            Some(l) => g.lobby.insert(user, l),
+            None => g.lobby.remove(&user),
+        };
+        true
+    }
+
     pub fn presence(&self, user: i64, last_seen_at: i64) -> Presence {
         let g = self.inner.lock().unwrap();
         let online = g.conns.contains_key(&user);
-        let game = g.playing.get(&user).cloned();
+        let lobby = g.lobby.get(&user).cloned();
+        // A game in a lobby counts as playing, even when run from an editor rather than the app.
+        let game = g.playing.get(&user).cloned().or_else(|| lobby.as_ref().map(|l| l.game.clone()));
         Presence {
-            status: if game.is_some() { "in_game" } else if online { "online" } else { "offline" }.into(),
+            status: if game.is_some() { "in_game" } else if online || lobby.is_some() { "online" } else { "offline" }.into(),
             game,
             last_seen_at: if online { now() } else { last_seen_at },
+            lobby,
         }
     }
 

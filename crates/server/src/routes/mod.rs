@@ -1,6 +1,6 @@
 pub mod accounts;
 mod chunks;
-mod games;
+pub mod games;
 pub mod images;
 pub mod social;
 
@@ -47,6 +47,7 @@ pub fn router(state: AppState) -> Router {
         .route("/messages/{username}", get(social::history).post(social::send))
         .route("/messages/{username}/read", post(social::mark_read))
         .route("/ws", get(crate::hub::ws))
+        .route("/play", get(crate::play::ws))
         // chunks
         .route("/chunks/missing", post(chunks::missing))
         .route("/chunks/{hash}", get(chunks::download).put(chunks::upload));

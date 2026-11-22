@@ -251,7 +251,7 @@ pub struct ImageUploaded {
 
 // ---- social -----------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PresenceGame {
     pub slug: String,
     pub title: String,
@@ -263,6 +263,17 @@ pub struct Presence {
     pub status: String,
     pub game: Option<PresenceGame>,
     pub last_seen_at: i64,
+    /// A multiplayer lobby they're in that their friends can join.
+    #[serde(default)]
+    pub lobby: Option<PresenceLobby>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PresenceLobby {
+    pub id: String,
+    pub game: PresenceGame,
+    pub members: u32,
+    pub max_members: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -311,6 +322,8 @@ pub enum WsEvent {
     Presence { user: String, presence: Presence },
     Message { message: ChatMessage },
     FriendsChanged,
+    /// A friend invited you to their multiplayer lobby.
+    LobbyInvite { from: String, from_name: String, lobby: PresenceLobby },
 }
 
 /// Client -> server commands on the socket.

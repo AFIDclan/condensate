@@ -3,6 +3,7 @@
 //   - Linux: an AppImage (updates itself) and a .deb, built on the server over ssh
 //   - latest.json, which installed apps poll to update themselves
 //   - index.html, the download page at <server>/download/
+//   - condensate-godot.zip, the Godot multiplayer addon (sdk/godot/addons/condensate)
 //
 // Usage: node scripts/release.mjs ["release notes"] [--only windows|linux|page]
 // Windows builds on this machine. Linux builds in ~/condensate on the deploy host, which needs
@@ -11,10 +12,11 @@
 // `--only page` rebuilds just the download page from the published latest.json.
 // Env: CONDENSATE_DEPLOY_HOST (default oort-tunnel), CONDENSATE_SERVER (public URL).
 import { execSync, spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { crc32, deflateRawSync } from "node:zlib";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const client = join(here, "..");
@@ -112,6 +114,8 @@ if (only === "page") {
     }
   }
 
+  writeFileSync(join(out, "condensate-godot.zip"), zipFolder(join(repo, "sdk", "godot"), "addons/condensate"));
+  uploads.push("condensate-godot.zip");
   writeFileSync(join(out, "latest.json"), JSON.stringify({ version, notes: args[0] ?? `Condensate ${version}`, pub_date: new Date().toISOString(), platforms }, null, 2));
 }
 
@@ -190,6 +194,61 @@ document.getElementById("more").innerHTML = ["v${version}", ...options.filter((o
 </body>
 </html>
 `;
+}
+
+/** A .zip of `root/folder`, with paths starting at `folder` (so it unpacks into a Godot project as is). */
+function zipFolder(root, folder) {
+  const files = [];
+  const walk = (rel) => {
+    for (const name of readdirSync(join(root, rel)).sort()) {
+      const path = `${rel}/${name}`;
+      if (statSync(join(root, path)).isDirectory()) walk(path);
+      else files.push(path);
+    }
+  };
+  walk(folder);
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  const DOS_DATE = (1 << 5) | 1; // 1980-01-01, so the zip is the same for the same files
+  for (const path of files) {
+    const data = readFileSync(join(root, path));
+    const packed = deflateRawSync(data);
+    const name = Buffer.from(path);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x0800, 6); // UTF-8 names
+    local.writeUInt16LE(8, 8); // deflate
+    local.writeUInt16LE(DOS_DATE, 12);
+    local.writeUInt32LE(crc32(data), 14);
+    local.writeUInt32LE(packed.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    const entry = Buffer.alloc(46);
+    entry.writeUInt32LE(0x02014b50, 0);
+    entry.writeUInt16LE(20, 4);
+    entry.writeUInt16LE(20, 6);
+    entry.writeUInt16LE(0x0800, 8);
+    entry.writeUInt16LE(8, 10);
+    entry.writeUInt16LE(DOS_DATE, 14);
+    entry.writeUInt32LE(crc32(data), 16);
+    entry.writeUInt32LE(packed.length, 20);
+    entry.writeUInt32LE(data.length, 24);
+    entry.writeUInt16LE(name.length, 28);
+    entry.writeUInt32LE(offset, 42);
+    parts.push(local, name, packed);
+    central.push(entry, name);
+    offset += local.length + name.length + packed.length;
+  }
+  const dir = Buffer.concat(central);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(files.length, 8);
+  end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(dir.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, dir, end]);
 }
 
 /** Run a shell script (one command per array entry) on the deploy host; returns its stdout. */

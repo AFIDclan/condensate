@@ -78,6 +78,24 @@ condensate game delete-version my-game 0.4.3
 ```
 Or use **Studio → Versions**. Players are then offered the newest remaining version.
 
+## Multiplayer
+
+Condensate provides lobbies, friend invites and a relay for game traffic, so a game needs no server of its own.
+
+**Godot 4.3+:**
+1. Copy `sdk/godot/addons/condensate` from the Condensate repository into the project and enable the plugin.
+2. Set **Project Settings → Condensate → Game Id** to the game's id.
+3. To host, call `await Condensate.create_lobby()`. To join, call `await Condensate.join_lobby(id)`.
+4. Then set `multiplayer.multiplayer_peer = Condensate.create_peer()`.
+5. Connect `Condensate.join_requested` to a function that joins that lobby. It fires when the player clicks **Join** on a friend in Condensate, or accepts an invite.
+
+The host is peer 1, as with ENet, so RPCs, `MultiplayerSpawner` and `MultiplayerSynchronizer` work unchanged. See `sdk/godot/addons/condensate/README.md` for the full API.
+
+**Other engines:** the protocol is a WebSocket carrying JSON messages and binary packets; see `crates/core/src/play.rs`. When Condensate launches a game, it sets three environment variables:
+- `CONDENSATE_API`
+- `CONDENSATE_TOKEN`
+- `CONDENSATE_GAME`
+
 ## Checking the result
 
 ```sh

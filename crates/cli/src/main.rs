@@ -374,7 +374,13 @@ async fn run() -> Result<()> {
             });
         }
         Command::Launch { dir } => {
-            let mut child = condensate_sdk::launch::launch(&dir)?;
+            // Let the game reach the multiplayer API when the app is running.
+            let game = condensate_core::install::read_installed(&dir)?.map(|s| s.game);
+            let env = match (condensate_sdk::login_store::game_api(), game) {
+                (Some((api, token)), Some(game)) => vec![("CONDENSATE_API", api), ("CONDENSATE_TOKEN", token), ("CONDENSATE_GAME", game)],
+                _ => vec![],
+            };
+            let mut child = condensate_sdk::launch::launch(&dir, &env)?;
             let status = child.wait()?;
             if !status.success() {
                 bail!("game exited with {status}");

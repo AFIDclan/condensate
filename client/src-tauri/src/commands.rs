@@ -10,6 +10,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
+use std::sync::Arc;
+
+use crate::game_api::GameApi;
 use crate::state::{AppState, Job};
 
 pub type CmdResult<T> = Result<T, String>;
@@ -282,11 +285,39 @@ struct GameExited {
 
 #[tauri::command]
 pub async fn play(app: AppHandle, state: State<'_, AppState>, slug: String) -> CmdResult<()> {
+    start_game(app, &state, slug, None)
+}
+
+/// Join a friend's multiplayer lobby: hand it to the game if it's already running, otherwise
+/// launch the game and let it join once it connects.
+#[tauri::command]
+pub async fn join_lobby(app: AppHandle, state: State<'_, AppState>, slug: String, lobby: String) -> CmdResult<()> {
+    if app.state::<Arc<GameApi>>().request_join(&slug, &lobby) {
+        return Ok(());
+    }
+    if state.running.lock().unwrap().contains_key(&slug) {
+        return Err("The game is running but isn't connected to Condensate multiplayer.".into());
+    }
+    if read_installed(&state.game_dir(&slug)).ok().flatten().is_none() {
+        return Err("Install the game first, then join again.".into());
+    }
+    start_game(app, &state, slug, Some(lobby))
+}
+
+fn start_game(app: AppHandle, state: &AppState, slug: String, join: Option<String>) -> CmdResult<()> {
     if state.running.lock().unwrap().contains_key(&slug) {
         return Err("already running".into());
     }
     let dir = state.game_dir(&slug);
-    let mut child = condensate_sdk::launch::launch(&dir).map_err(err)?;
+    let api = app.state::<Arc<GameApi>>().inner().clone();
+    let (launch_token, env) = api.launch_env(&slug, join);
+    let mut child = match condensate_sdk::launch::launch(&dir, &env) {
+        Ok(child) => child,
+        Err(e) => {
+            api.forget_launch(&launch_token);
+            return Err(err(e));
+        }
+    };
     state.running.lock().unwrap().insert(slug.clone(), child.id());
     let _ = app.emit("game-started", &slug);
     crate::realtime::send(&app, WsCommand::Playing { game: Some(slug.clone()) });
@@ -294,6 +325,7 @@ pub async fn play(app: AppHandle, state: State<'_, AppState>, slug: String) -> C
     let started = std::time::Instant::now();
     std::thread::spawn(move || {
         let code = child.wait().ok().and_then(|s| s.code());
+        api.forget_launch(&launch_token);
         let seconds = started.elapsed().as_secs() as i64;
         let state = app.state::<AppState>();
         state.running.lock().unwrap().remove(&slug);

@@ -4,6 +4,7 @@ mod db;
 mod error;
 mod housekeeping;
 mod hub;
+mod play;
 mod routes;
 mod state;
 mod storage;

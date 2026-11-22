@@ -13,6 +13,7 @@ Friends install the app (Windows or Linux) from `<server>/download/` and create 
 | `crates/server` | `condensate-server`: axum + SQLite. Chunks and images are stored on disk; a WebSocket hub handles presence and chat. |
 | `crates/cli` | `condensate`: publish, install/update, launch, and manage games. Shipped inside the app's installer. |
 | `client/` | Tauri 2 + React desktop app: Library, Store, Friends, Studio, Account. |
+| `sdk/godot/` | Godot 4 multiplayer addon (`addons/condensate`) and a demo project. |
 | `deploy/` | systemd units (server and nightly maintenance) and deploy scripts. |
 | `docs/PUBLISHING.md` | How to publish a game (written for agents too). |
 
@@ -40,6 +41,18 @@ deploy/sync.sh                                         # copy source to oort:~/c
 ssh oort-tunnel 'cd ~/condensate && cargo test && bash scripts/e2e.sh'
 deploy/deploy-server.sh                                # release build, install systemd units, restart
 ```
+
+## Multiplayer
+
+Games get lobbies, friend invites and a packet relay without running a server. Each game connects to the Condensate app on the same PC over a local WebSocket. The app logs the game in and forwards its traffic to the server's `/api/v1/play` socket, so the game never sees the user's login token.
+
+The app can later route traffic over faster paths, such as direct connections between players or a UDP relay after a port forward, without games changing.
+
+- **Protocol:** `crates/core/src/play.rs`
+- **Server side:** `crates/server/src/play.rs`
+- **App side:** `client/src-tauri/src/game_api.rs`
+- **Godot addon:** `sdk/godot`
+- **Tests:** `bash scripts/play-test.sh` on oort. Set `GODOT=/path/to/godot` to also run three headless Godot copies playing together.
 
 ## Desktop client
 

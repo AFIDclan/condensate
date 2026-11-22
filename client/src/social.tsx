@@ -1,6 +1,6 @@
 import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api, ChatMessage, Conversation, errorMessage, FriendsResponse, WsEvent } from "./api";
+import { api, ChatMessage, Conversation, errorMessage, FriendsResponse, PresenceLobby, WsEvent } from "./api";
 import { useToast } from "./components";
 
 interface Social {
@@ -15,6 +15,8 @@ interface Social {
   /** Subscribe to new messages for one conversation. */
   onMessage: (f: (m: ChatMessage) => void) => () => void;
   markRead: (username: string) => void;
+  /** Join a friend's multiplayer lobby (launching the game if needed). */
+  joinLobby: (lobby: PresenceLobby) => void;
 }
 
 const SocialContext = createContext<Social | null>(null);
@@ -54,6 +56,16 @@ export function SocialProvider({ me, children }: { me: string; children: ReactNo
     api.markRead(username).catch(() => {});
   }, []);
 
+  const joinLobby = useCallback(
+    (lobby: PresenceLobby) => {
+      api.joinLobby(lobby.game.slug, lobby.id).then(
+        () => toast("info", `Joining ${lobby.game.title}…`),
+        (e) => toast("error", errorMessage(e)),
+      );
+    },
+    [toast],
+  );
+
   useEffect(() => {
     refreshFriends();
     refreshConversations();
@@ -79,6 +91,8 @@ export function SocialProvider({ me, children }: { me: string; children: ReactNo
               return f;
             });
           });
+        } else if (ev.type === "lobby_invite") {
+          toast("info", `${ev.from_name} invited you to play ${ev.lobby.game.title}`, { label: "Join", run: () => joinLobby(ev.lobby) });
         } else if (ev.type === "message") {
           const m = ev.message;
           const other = m.from === me ? m.to : m.from;
@@ -100,7 +114,7 @@ export function SocialProvider({ me, children }: { me: string; children: ReactNo
       }),
     ];
     return () => unlisten.forEach((p) => p.then((f) => f()));
-  }, [me, refreshFriends, refreshConversations, toast]);
+  }, [me, refreshFriends, refreshConversations, toast, joinLobby]);
 
   const value = useMemo<Social>(
     () => ({
@@ -117,8 +131,9 @@ export function SocialProvider({ me, children }: { me: string; children: ReactNo
         return () => listeners.current.delete(f);
       },
       markRead,
+      joinLobby,
     }),
-    [friends, conversations, connected, refreshFriends, markRead],
+    [friends, conversations, connected, refreshFriends, markRead, joinLobby],
   );
 
   return <SocialContext.Provider value={value}>{children}</SocialContext.Provider>;

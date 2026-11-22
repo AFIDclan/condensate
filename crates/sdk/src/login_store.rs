@@ -45,6 +45,14 @@ pub fn app_path() -> Option<PathBuf> {
     read_object().get("app_path").and_then(Value::as_str).filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 
+/// The running app's local multiplayer API, as (`ws://` URL, token), from the file it writes at
+/// startup (`condensate_core::play::GAME_API_FILE`).
+pub fn game_api() -> Option<(String, String)> {
+    let path = dirs::config_dir()?.join(APP_ID).join(condensate_core::play::GAME_API_FILE);
+    let v: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    Some((v.get("api")?.as_str()?.to_string(), v.get("token")?.as_str()?.to_string()))
+}
+
 pub fn save(login: &StoredLogin) -> Result<()> {
     let path = settings_path().context("no config directory on this system")?;
     let mut m = read_object();

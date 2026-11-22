@@ -33,13 +33,20 @@ export function PrimaryButton({ item, actions, size }: { item: LibraryItem; acti
 
 // ---- toasts ---------------------------------------------------------------------------------
 
+/** A button on a toast, such as "Join" on a game invite. */
+export interface ToastAction {
+  label: string;
+  run: () => void;
+}
+
 interface Toast {
   id: number;
   kind: "info" | "error";
   text: string;
+  action?: ToastAction;
 }
 
-const ToastContext = createContext<(kind: Toast["kind"], text: string) => void>(() => {});
+const ToastContext = createContext<(kind: Toast["kind"], text: string, action?: ToastAction) => void>(() => {});
 
 export function useToast() {
   return useContext(ToastContext);
@@ -47,10 +54,11 @@ export function useToast() {
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const push = useCallback((kind: Toast["kind"], text: string) => {
+  const push = useCallback((kind: Toast["kind"], text: string, action?: ToastAction) => {
     const id = Date.now() + Math.random();
-    setToasts((t) => [...t, { id, kind, text }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === "error" ? 8000 : 5000);
+    setToasts((t) => [...t, { id, kind, text, action }]);
+    // Toasts you can act on stay longer.
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), action ? 30000 : kind === "error" ? 8000 : 5000);
   }, []);
   return (
     <ToastContext.Provider value={push}>
@@ -58,7 +66,19 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       <div className="toasts">
         {toasts.map((t) => (
           <div key={t.id} className={`toast toast-${t.kind}`} onClick={() => setToasts((x) => x.filter((y) => y.id !== t.id))}>
-            {t.text}
+            <span>{t.text}</span>
+            {t.action && (
+              <button
+                className="toast-action"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setToasts((x) => x.filter((y) => y.id !== t.id));
+                  t.action!.run();
+                }}
+              >
+                {t.action.label}
+              </button>
+            )}
           </div>
         ))}
       </div>

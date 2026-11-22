@@ -71,6 +71,7 @@ export default function Friends({ me, initialChat }: { me: string; initialChat?:
                   onClick={() => setChat(f.user.username)}
                   onContextMenu={(e) =>
                     menu.open(e, [
+                      ...(f.presence.lobby ? [{ label: `Join in ${f.presence.lobby.game.title}`, icon: "play" as const, onClick: () => social.joinLobby(f.presence.lobby!) }] : []),
                       { label: "Message", icon: "notes", onClick: () => setChat(f.user.username) },
                       {
                         label: "Remove friend",
@@ -87,6 +88,19 @@ export default function Friends({ me, initialChat }: { me: string; initialChat?:
                     <span className={f.presence.status === "in_game" ? "in-game" : ""}>{presenceText(f)}</span>
                   </div>
                   {unread > 0 && <span className="badge">{unread}</span>}
+                  {f.presence.lobby && (
+                    <span
+                      className="join-chip"
+                      role="button"
+                      title={`Join ${f.user.display_name} in ${f.presence.lobby.game.title}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        social.joinLobby(f.presence.lobby!);
+                      }}
+                    >
+                      Join
+                    </span>
+                  )}
                 </button>
               );
             })}
@@ -237,6 +251,11 @@ function Chat({ friend, me }: { friend: Friend; me: string }) {
             @{friend.user.username} · {presenceText(friend)}
           </div>
         </div>
+        {friend.presence.lobby && (
+          <button className="plain-btn join-btn" onClick={() => social.joinLobby(friend.presence.lobby!)}>
+            Join game · {friend.presence.lobby.members}/{friend.presence.lobby.max_members}
+          </button>
+        )}
       </header>
       <div className="chat-scroll" ref={scroller}>
         {!messages && <Spinner />}

@@ -207,6 +207,9 @@ code { font-family: "Cascadia Mono", Consolas, monospace; background: var(--rais
 .toasts { position: fixed; right: 24px; bottom: 24px; display: flex; flex-direction: column; gap: 8px; z-index: 60; max-width: 420px; }
 .toast { background: var(--panel-2); border: 1px solid var(--edge-strong); border-left: 3px solid var(--accent); border-radius: 8px; padding: 12px 16px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6); cursor: pointer; user-select: text; }
 .toast-error { border-left-color: var(--danger); }
+.toast:has(.toast-action) { display: flex; align-items: center; gap: 14px; }
+.toast-action { flex-shrink: 0; padding: 6px 14px; border-radius: 6px; font-weight: 700; background: var(--text); color: #000; }
+.toast-action:hover { background: #fff; }
 .spinner { width: 28px; height: 28px; border: 3px solid var(--edge-strong); border-top-color: var(--text); border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 ::-webkit-scrollbar { width: 10px; }
