@@ -274,6 +274,9 @@ pub struct PresenceLobby {
     pub game: PresenceGame,
     pub members: u32,
     pub max_members: u32,
+    /// The lobby is recording feedback (voice and screenshots) for the game's developer.
+    #[serde(default)]
+    pub recording: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,4 +336,62 @@ pub enum WsCommand {
     Ping,
     /// What the user is playing right now (`None` when they stop).
     Playing { game: Option<String> },
+}
+
+/// A feedback recording: a playtest's voice chat (transcribed per player) and the screenshots
+/// players took, for the game's owner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedbackSummary {
+    pub id: String,
+    pub game: String,
+    pub game_title: String,
+    /// Display name of whoever hosted the lobby.
+    pub host: String,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+    /// recording | transcribing | ready | untranscribed | failed
+    pub status: String,
+    /// Why transcription failed, or why it didn't run.
+    pub note: Option<String>,
+    /// Latest published version of the game when recording started.
+    pub version: Option<String>,
+    /// Display names of everyone who spoke or took a screenshot.
+    pub players: Vec<String>,
+    pub utterances: i64,
+    pub shots: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedbackDetail {
+    #[serde(flatten)]
+    pub summary: FeedbackSummary,
+    pub utterances: Vec<FeedbackUtterance>,
+    pub shots: Vec<FeedbackShot>,
+}
+
+/// One stretch of someone talking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedbackUtterance {
+    pub id: i64,
+    pub username: String,
+    pub display_name: String,
+    /// Milliseconds from the start of the recording.
+    pub at_ms: i64,
+    pub duration_ms: i64,
+    /// `None` until transcribed.
+    pub text: Option<String>,
+    /// The audio (Ogg Opus), fetched like screenshots.
+    pub file: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedbackShot {
+    pub id: i64,
+    pub username: String,
+    pub display_name: String,
+    pub at_ms: i64,
+    /// File name, fetched from `/api/v1/feedback/{session}/files/{file}`.
+    pub file: String,
+    /// What the game reported with it: `scene`, `version`, and the game's own `context`.
+    pub meta: serde_json::Value,
 }

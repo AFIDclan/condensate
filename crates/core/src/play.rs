@@ -22,6 +22,22 @@
 //! delivered in order; over the TCP relay even "unreliable" ones arrive, but they may be dropped
 //! when a player's connection falls behind.
 //!
+//! Two more `mode` values are used between the app and the server, never by games' own packets:
+//!
+//! - [`MODE_VOICE`]: voice chat. The payload is one 20 ms Opus frame (48 kHz, mono). The app
+//!   sends these only while the player is talking; the server forwards them to the other members
+//!   whose connection carries voice (see [`PlayCommand::Voice`]), stamped with the speaker.
+//! - [`MODE_SCREENSHOT`]: game -> app only. A feedback screenshot: `[meta length: u32 LE][meta
+//!   JSON][JPEG]`. The app uploads it to the lobby's feedback recording.
+//!
+//! ## Feedback recordings
+//!
+//! The host can turn on feedback recording for a lobby ([`PlayCommand::SetFeedback`]). While it
+//! is on, the server saves each member's voice separately (unless they opted out with
+//! [`PlayCommand::RecordMe`]) and players can take screenshots with a hotkey. Afterwards the
+//! server transcribes the voice, and the game's owner gets a timeline of who said what, with the
+//! screenshots in place, to read or hand to an LLM.
+//!
 //! Lobby members are numbered per lobby: the host (whoever created it) is always 1 and everyone
 //! else gets 2, 3, ... in join order. When the host leaves, the lobby closes. This matches
 //! Godot's client/server model, where the server is peer 1.
@@ -47,6 +63,12 @@ pub const MAX_PACKET: usize = 1 << 20;
 pub const MAX_MEMBERS: u32 = 64;
 /// Largest lobby `data`, as JSON.
 pub const MAX_LOBBY_DATA: usize = 8 * 1024;
+/// Binary `mode` for voice frames (see the module docs).
+pub const MODE_VOICE: u8 = 3;
+/// Binary `mode` for feedback screenshots, game -> app (see the module docs).
+pub const MODE_SCREENSHOT: u8 = 4;
+/// Samples per voice frame: 20 ms at 48 kHz.
+pub const VOICE_FRAME: usize = 960;
 /// Written by the app to its config folder: `{"api": "ws://127.0.0.1:<port>/", "token": "..."}`.
 /// Lets games run from an editor connect without being launched by Condensate.
 pub const GAME_API_FILE: &str = "game-api.json";
@@ -134,6 +156,26 @@ pub enum PlayCommand {
         #[serde(default)]
         rid: Option<u64>,
     },
+    /// Sent by the app, not games: this connection carries the player's voice. The server only
+    /// accepts and forwards voice frames on such connections (one per player at most matters).
+    Voice {
+        #[serde(default)]
+        rid: Option<u64>,
+        on: bool,
+    },
+    /// Host only: start or stop a feedback recording of this lobby. Everyone in the lobby gets
+    /// [`PlayEvent::Feedback`].
+    SetFeedback {
+        #[serde(default)]
+        rid: Option<u64>,
+        on: bool,
+    },
+    /// Whether to include your voice in the lobby's feedback recordings (on by default).
+    RecordMe {
+        #[serde(default)]
+        rid: Option<u64>,
+        on: bool,
+    },
     /// Keepalive; the connection closes after 90 seconds of silence.
     Ping,
 }
@@ -177,6 +219,8 @@ pub enum PlayEvent {
     },
     MemberJoined { member: Member },
     MemberLeft { member: u32 },
+    /// A member's voice or recording settings changed.
+    MemberUpdated { member: Member },
     LobbyData { data: Map<String, Value> },
     /// You're no longer in the lobby: `host_left` or `kicked`.
     LobbyClosed { reason: String },
@@ -184,6 +228,12 @@ pub enum PlayEvent {
     /// The game should join that lobby (when Condensate launched the game for it, this arrives
     /// right after `welcome`).
     JoinRequested { lobby: String },
+    /// Feedback recording started (`session` is set) or stopped (`session` is null).
+    Feedback {
+        session: Option<String>,
+        /// Who started or stopped it.
+        by: PlayUser,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,6 +247,16 @@ pub struct Member {
     pub id: u32,
     pub username: String,
     pub display_name: String,
+    /// Connected to voice chat (through the Condensate app).
+    #[serde(default)]
+    pub voice: bool,
+    /// Included in feedback recordings (players can opt out).
+    #[serde(default = "yes")]
+    pub recorded: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +267,9 @@ pub struct LobbyInfo {
     pub visibility: LobbyVisibility,
     pub members: Vec<Member>,
     pub data: Map<String, Value>,
+    /// The feedback recording in progress, if any.
+    #[serde(default)]
+    pub feedback: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +279,9 @@ pub struct LobbySummary {
     pub members: u32,
     pub max_members: u32,
     pub data: Map<String, Value>,
+    /// A feedback recording is in progress.
+    #[serde(default)]
+    pub recording: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

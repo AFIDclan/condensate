@@ -99,6 +99,8 @@ export interface PresenceLobby {
   game: { slug: string; title: string };
   members: number;
   max_members: number;
+  /** The lobby is recording feedback for the game's developer. */
+  recording?: boolean;
 }
 
 export interface Presence {
@@ -160,6 +162,82 @@ export interface GameChanges {
   banner_image?: string;
 }
 
+/** The lobby a running game is in, and voice chat (from the `voice-state` event). */
+export interface VoiceState {
+  game: { slug: string; title: string } | null;
+  lobby: string | null;
+  host: boolean;
+  members: VoiceMember[];
+  feedback: string | null;
+  connected: boolean;
+  muted: boolean;
+  deafened: boolean;
+  problems: string[];
+  level: number | null;
+  talking: boolean;
+}
+
+export interface VoiceMember {
+  id: number;
+  username: string;
+  display_name: string;
+  you: boolean;
+  voice: boolean;
+  recorded: boolean;
+  speaking: boolean;
+}
+
+export interface VoiceSettings {
+  input: string | null;
+  output: string | null;
+  auto_sensitivity: boolean;
+  threshold_db: number;
+  noise_suppression: boolean;
+  volume: number;
+  muted: boolean;
+  deafened: boolean;
+}
+
+export interface FeedbackSummary {
+  id: string;
+  game: string;
+  game_title: string;
+  host: string;
+  started_at: number;
+  ended_at: number | null;
+  status: "recording" | "transcribing" | "ready" | "untranscribed" | "failed";
+  note: string | null;
+  version: string | null;
+  players: string[];
+  utterances: number;
+  shots: number;
+}
+
+export interface FeedbackUtterance {
+  id: number;
+  username: string;
+  display_name: string;
+  at_ms: number;
+  duration_ms: number;
+  text: string | null;
+  file: string;
+}
+
+export interface FeedbackShot {
+  id: number;
+  username: string;
+  display_name: string;
+  at_ms: number;
+  file: string;
+  meta: { scene?: string; version?: string; note?: string; context?: unknown };
+}
+
+/** `feedback_detail` returns the summary fields plus the timeline under the same names. */
+export type FeedbackTimeline = Omit<FeedbackSummary, "utterances" | "shots"> & {
+  utterances: FeedbackUtterance[];
+  shots: FeedbackShot[];
+};
+
 export const api = {
   session: () => invoke<Session>("session"),
   login: (server: string, username: string, password: string) =>
@@ -198,6 +276,19 @@ export const api = {
   createToken: (name: string, game: string | null) => invoke<{ token: string; info: TokenInfo }>("create_token", { name, game }),
   revokeToken: (id: number) => invoke<void>("revoke_token", { id }),
   setLibraryDir: (path: string) => invoke<string>("set_library_dir", { path }),
+  voiceState: () => invoke<VoiceState>("voice_state"),
+  voiceDevices: () => invoke<{ inputs: string[]; outputs: string[] }>("voice_devices"),
+  voiceSettings: () => invoke<VoiceSettings>("voice_settings"),
+  setVoiceSettings: (settings: VoiceSettings) => invoke<void>("set_voice_settings", { settings }),
+  micTest: (on: boolean) => invoke<void>("mic_test", { on }),
+  setFeedback: (on: boolean) => invoke<void>("set_feedback", { on }),
+  setRecordMe: (on: boolean) => invoke<void>("set_record_me", { on }),
+  feedbackList: (slug: string) => invoke<FeedbackSummary[]>("feedback_list", { slug }),
+  feedbackDetail: (id: string) => invoke<FeedbackTimeline>("feedback_detail", { id }),
+  feedbackFile: (id: string, file: string) => invoke<ArrayBuffer>("feedback_file", { id, file }),
+  deleteFeedback: (id: string) => invoke<void>("delete_feedback", { id }),
+  retranscribeFeedback: (id: string) => invoke<void>("retranscribe_feedback", { id }),
+  exportFeedback: (id: string, dir: string) => invoke<string>("export_feedback", { id, dir }),
 };
 
 // Image URLs need the server address; set once the session is known.

@@ -25,6 +25,7 @@ func _ready() -> void:
 	_button(buttons, "Host a lobby", _host)
 	_button(buttons, "Leave", Condensate.leave_lobby)
 	_button(buttons, "Refresh", _refresh)
+	_button(buttons, "Record feedback", _toggle_feedback)
 
 	var columns := HBoxContainer.new()
 	columns.custom_minimum_size.y = 200
@@ -49,6 +50,9 @@ func _ready() -> void:
 	Condensate.join_requested.connect(_join)
 	Condensate.lobby_left.connect(func(reason): _print("Left the lobby (%s)" % reason); _refresh())
 	Condensate.member_joined.connect(func(m): _print("%s joined" % m.display_name))
+	Condensate.feedback_changed.connect(func(on, by): _print("%s %s a feedback recording (F12 takes a screenshot)" % [by, "started" if on else "stopped"]))
+	# Saved with every feedback screenshot, so the developer knows where it was taken.
+	Condensate.feedback_context = func(): return {"lobby_members": Condensate.lobby.get("members", []).size()}
 	multiplayer.peer_connected.connect(func(id): _print("Peer %d connected" % id))
 	multiplayer.peer_disconnected.connect(func(id): _print("Peer %d disconnected" % id))
 	_status.text = "Connecting to Condensate..."
@@ -60,6 +64,13 @@ func _host() -> void:
 	multiplayer.multiplayer_peer = Condensate.create_peer()
 	_print("Hosting. Friends can join from Condensate, or invite them below.")
 	_refresh()
+
+
+func _toggle_feedback() -> void:
+	if not Condensate.is_host():
+		_print("Only the host can record feedback.")
+		return
+	await Condensate.set_feedback(not Condensate.is_recording_feedback())
 
 
 func _join(lobby_id: String) -> void:

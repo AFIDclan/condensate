@@ -16,6 +16,7 @@ import Game from "./pages/Game";
 import Account from "./pages/Account";
 import Friends from "./pages/Friends";
 import Studio from "./pages/Studio";
+import { VoiceDock } from "./voice";
 
 export type Route =
   | { page: "library" }
@@ -170,6 +171,7 @@ function Shell({ session, onLogout, onUserChanged }: { session: Session; onLogou
         {route.page === "studio" && <Studio server={session.server} openStorePage={(slug) => setRoute({ page: "game", slug, from: "studio" })} />}
         {route.page === "account" && <Account session={session} onLogout={onLogout} onUserChanged={onUserChanged} />}
       </main>
+      <VoiceDock />
     </div>
   );
 }

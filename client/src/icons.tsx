@@ -17,6 +17,10 @@ const paths: Record<string, string> = {
   check: "M5 12.5l4.5 4.5L19 7.5",
   more: "M5 12h.01M12 12h.01M19 12h.01",
   chevron: "M9 5l7 7-7 7",
+  mic: "M12 3.5a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0v-5a3 3 0 0 0-3-3zM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21",
+  "mic-off": "M15 9.5v-3a3 3 0 0 0-5.6-1.5M9 9v2.5a3 3 0 0 0 4.7 2.5M5.5 11a6.5 6.5 0 0 0 10.8 4.9M18.5 11a6.4 6.4 0 0 1-.5 2.5M12 17.5V21M4 4l16 16",
+  headphones: "M4 18v-5a8 8 0 0 1 16 0v5M4 15h3v5H5a1 1 0 0 1-1-1zM20 15h-3v5h2a1 1 0 0 0 1-1z",
+  "headphones-off": "M6.3 6.3A8 8 0 0 0 4 12v6M20 18v-6a8 8 0 0 0-11.5-7.2M4 15h3v5H5a1 1 0 0 1-1-1zM20 15h-3v5h2M4 4l16 16",
 };
 
 export function Icon({ name, size = 18, className }: { name: keyof typeof paths | string; size?: number; className?: string }) {

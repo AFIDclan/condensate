@@ -294,4 +294,40 @@ impl Client {
         let resp = self.send_raw(self.req(Method::GET, &format!("/chunks/{hash}"))).await?;
         Ok(resp.bytes().await?)
     }
+
+    // ---- feedback recordings -------------------------------------------------------------------
+
+    /// A game's feedback recordings, newest first (owner only).
+    pub async fn feedback_list(&self, slug: &str) -> Result<Vec<FeedbackSummary>> {
+        self.get(&format!("/games/{slug}/feedback")).await
+    }
+
+    pub async fn feedback(&self, id: &str) -> Result<FeedbackDetail> {
+        self.get(&format!("/feedback/{id}")).await
+    }
+
+    /// The recording's timeline as Markdown.
+    pub async fn feedback_transcript(&self, id: &str) -> Result<String> {
+        Ok(self.send_raw(self.req(Method::GET, &format!("/feedback/{id}/transcript"))).await?.text().await?)
+    }
+
+    /// A screenshot or audio file from a recording.
+    pub async fn feedback_file(&self, id: &str, file: &str) -> Result<Bytes> {
+        Ok(self.send_raw(self.req(Method::GET, &format!("/feedback/{id}/files/{file}"))).await?.bytes().await?)
+    }
+
+    pub async fn delete_feedback(&self, id: &str) -> Result<()> {
+        self.delete::<OkResponse>(&format!("/feedback/{id}")).await.map(|_| ())
+    }
+
+    /// Queue the recording for transcription again.
+    pub async fn retranscribe_feedback(&self, id: &str) -> Result<()> {
+        self.send::<OkResponse>(self.req(Method::POST, &format!("/feedback/{id}/transcribe"))).await.map(|_| ())
+    }
+
+    /// Add a screenshot to a recording in progress: `[meta length: u32 LE][meta JSON][image]`.
+    pub async fn upload_feedback_shot(&self, id: &str, body: Vec<u8>) -> Result<()> {
+        let rb = self.req(Method::POST, &format!("/feedback/{id}/shots")).header(reqwest::header::CONTENT_TYPE, "application/octet-stream").body(body);
+        self.send::<serde_json::Value>(rb).await.map(|_| ())
+    }
 }

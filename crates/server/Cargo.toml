@@ -13,6 +13,7 @@ blake3.workspace = true
 bytes.workspace = true
 clap.workspace = true
 futures.workspace = true
+ogg = "0.9"
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true

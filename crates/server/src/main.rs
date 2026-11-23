@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod db;
 mod error;
+mod feedback;
 mod housekeeping;
 mod hub;
 mod play;
@@ -21,7 +22,9 @@ use crate::storage::Storage;
 
 /// Condensate server. Configured with environment variables:
 /// CONDENSATE_BIND (default 127.0.0.1:8470), CONDENSATE_DATA_DIR (default ./data),
-/// CONDENSATE_NAME, CONDENSATE_DIRECT_URL.
+/// CONDENSATE_NAME, CONDENSATE_DIRECT_URL. Feedback transcription: CONDENSATE_WHISPER (path to
+/// whisper.cpp's whisper-cli), CONDENSATE_WHISPER_MODEL (a ggml model file),
+/// CONDENSATE_WHISPER_LANGUAGE (default auto), CONDENSATE_FFMPEG (default ffmpeg).
 #[derive(Parser)]
 #[command(version)]
 struct Cli {

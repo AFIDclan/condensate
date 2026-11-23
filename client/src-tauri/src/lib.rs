@@ -2,6 +2,7 @@ mod commands;
 mod game_api;
 mod realtime;
 mod state;
+mod voice;
 
 use tauri::{Emitter, Manager};
 
@@ -27,8 +28,9 @@ pub fn run() {
             let data_dir = app.path().app_local_data_dir()?;
             let state = state::AppState::load(&config_dir, &data_dir);
             state.record_app_path();
+            let voice_settings = state.settings.lock().unwrap().voice.clone();
             app.manage(state);
-            app.manage(game_api::start(app.handle(), &config_dir)?);
+            app.manage(game_api::start(app.handle(), &config_dir, voice_settings)?);
             #[cfg(target_os = "linux")]
             std::thread::spawn(install_cli_from_appimage);
             // Launched at sign-in ("Start with Windows"): stay out of the way.
@@ -75,6 +77,19 @@ pub fn run() {
             commands::create_token,
             commands::revoke_token,
             commands::set_library_dir,
+            commands::voice_state,
+            commands::voice_devices,
+            commands::voice_settings,
+            commands::set_voice_settings,
+            commands::mic_test,
+            commands::set_feedback,
+            commands::set_record_me,
+            commands::feedback_list,
+            commands::feedback_detail,
+            commands::feedback_file,
+            commands::delete_feedback,
+            commands::retranscribe_feedback,
+            commands::export_feedback,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Condensate");

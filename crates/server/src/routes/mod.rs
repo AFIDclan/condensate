@@ -48,6 +48,13 @@ pub fn router(state: AppState) -> Router {
         .route("/messages/{username}/read", post(social::mark_read))
         .route("/ws", get(crate::hub::ws))
         .route("/play", get(crate::play::ws))
+        // feedback recordings
+        .route("/games/{slug}/feedback", get(crate::feedback::list))
+        .route("/feedback/{id}", get(crate::feedback::get).delete(crate::feedback::delete))
+        .route("/feedback/{id}/transcript", get(crate::feedback::transcript))
+        .route("/feedback/{id}/transcribe", post(crate::feedback::retranscribe))
+        .route("/feedback/{id}/shots", post(crate::feedback::upload_shot))
+        .route("/feedback/{id}/files/{file}", get(crate::feedback::file))
         // chunks
         .route("/chunks/missing", post(chunks::missing))
         .route("/chunks/{hash}", get(chunks::download).put(chunks::upload));

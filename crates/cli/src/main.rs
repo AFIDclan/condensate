@@ -82,9 +82,28 @@ enum Command {
     Launch { dir: PathBuf },
     /// Show a game's version history and changelogs
     Versions { game: String },
+    /// Playtest feedback recordings: transcribed voice chat and players' screenshots
+    #[command(subcommand)]
+    Feedback(FeedbackCmd),
     /// Installer support: add or remove the CLI from your PATH
     #[command(hide = true, subcommand)]
     Setup(SetupCmd),
+}
+
+#[derive(Subcommand)]
+enum FeedbackCmd {
+    /// List a game's feedback recordings, newest first
+    List { game: String },
+    /// Save a recording into a folder: transcript.md (who said what, with screenshots in
+    /// place), feedback.json and shots/
+    Pull {
+        game: String,
+        /// Recording id (default: the newest)
+        id: Option<String>,
+        /// Folder to save into
+        #[arg(long, default_value = "feedback")]
+        out: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -342,6 +361,41 @@ async fn run() -> Result<()> {
             println!("Revoked token {id}");
         }
         Command::Game(cmd) => game_cmd(&ctx, cmd).await?,
+        Command::Feedback(FeedbackCmd::List { game }) => {
+            let list = ctx.client().await?.feedback_list(&game).await?;
+            ctx.print(&list, || {
+                if list.is_empty() {
+                    println!("No feedback recordings for {game} yet. The host of a lobby can start one in the Condensate app.");
+                }
+                for f in &list {
+                    let (y, mo, d, h, mi) = condensate_core::utc_parts(f.started_at);
+                    println!(
+                        "{}  {y}-{mo:02}-{d:02} {h:02}:{mi:02} UTC  {:<13}  {} ({} lines, {} screenshots)",
+                        f.id,
+                        f.status,
+                        f.players.join(", "),
+                        f.utterances,
+                        f.shots
+                    );
+                }
+            });
+        }
+        Command::Feedback(FeedbackCmd::Pull { game, id, out }) => {
+            let client = ctx.client().await?;
+            let list = client.feedback_list(&game).await?;
+            let summary = match &id {
+                Some(id) => list.iter().find(|f| f.id == *id).ok_or_else(|| anyhow!("{game} has no feedback recording {id}"))?,
+                None => list.first().ok_or_else(|| anyhow!("{game} has no feedback recordings yet"))?,
+            };
+            let dir = condensate_sdk::feedback::export(&client, &summary.id, &out).await?;
+            match summary.status.as_str() {
+                "ready" => {}
+                "recording" => eprintln!("Note: this recording is still going; pull again when it's done."),
+                "transcribing" => eprintln!("Note: transcription isn't finished; pull again later for the full text."),
+                _ => eprintln!("Note: {}", summary.note.as_deref().unwrap_or("the voice wasn't transcribed")),
+            }
+            println!("{}", dir.join("transcript.md").display());
+        }
         Command::Push(args) => push_cmd(&ctx, args).await?,
         Command::Pull { game, dir, platform, repair } => {
             let platform = platform

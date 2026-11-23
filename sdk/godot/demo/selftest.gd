@@ -33,6 +33,8 @@ func _host() -> void:
 	_check(peers == [2, 3], "host sees peers 2 and 3: %s" % [peers])
 	await get_tree().create_timer(0.5).timeout
 	await Condensate.set_lobby_data({"map": "arena"})
+	_check(await Condensate.set_feedback(true), "host starts a feedback recording")
+	_check(Condensate.is_recording_feedback(), "host sees the recording")
 	while done.size() < 2:
 		await get_tree().process_frame
 	_check(hellos.size() == 2, "host got hello from both clients: %s" % [hellos])
@@ -55,6 +57,9 @@ func _client() -> void:
 	if Condensate.lobby.data.get("map") != "arena":
 		await Condensate.lobby_data_changed
 	_check(Condensate.lobby.data.get("map") == "arena", "lobby data reached the client")
+	if not Condensate.is_recording_feedback():
+		await Condensate.feedback_changed
+	_check(Condensate.is_recording_feedback(), "client sees the feedback recording")
 	await get_tree().create_timer(0.3).timeout
 	_hello.rpc(role)
 	# The other client's hello is relayed through the host.

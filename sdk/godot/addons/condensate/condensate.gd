@@ -38,14 +38,21 @@ signal lobby_data_changed(data: Dictionary)
 signal join_requested(lobby_id: String)
 ## A request failed, or Condensate reported a problem.
 signal error(message: String)
+## The lobby's feedback recording started or stopped. [param by] is who did it (display name).
+signal feedback_changed(recording: bool, by: String)
+## A feedback screenshot was taken and sent.
+signal screenshot_taken
 
 signal _reply(rid: int, message: Dictionary)
 
 enum State { DISCONNECTED, CONNECTING, CONNECTED }
 
 const GAME_ID_SETTING := "condensate/game_id"
+const SCREENSHOT_KEY_SETTING := "condensate/feedback_screenshot_key"
 const _HEADER := 6
+const _MODE_SCREENSHOT := 4
 const _MAX_BUFFERED := 4096
+const _MAX_SHOT_WIDTH := 1920
 
 var state := State.DISCONNECTED
 ## You: [code]username[/code], [code]display_name[/code].
@@ -61,14 +68,34 @@ var member_id := 0
 var launched_by_condensate := false
 ## The last connection problem, for showing to the player.
 var last_error := ""
+## The lobby's feedback recording id while one is running, else empty.
+var feedback_session := ""
+## Optional: a Callable returning a Dictionary about the current moment (level, position, ...).
+## It's saved with each feedback screenshot so the developer knows where it was taken.
+## [codeblock]
+## Condensate.feedback_context = func(): return {"level": level_name, "position": str(player.position)}
+## [/codeblock]
+var feedback_context := Callable()
 
 var _ws := WebSocketPeer.new()
 var _rid := 0
 var _peer: CondensateMultiplayerPeer
 var _inbox: Array = []
+var _screenshot_key := KEY_F12
+var _overlay: CanvasLayer
+var _rec_label: Label
+var _banner: Label
+var _banner_timer: SceneTreeTimer
+var _shooting := false
 
 
 func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
+	var key_name := str(ProjectSettings.get_setting(SCREENSHOT_KEY_SETTING, "F12"))
+	var key := OS.find_keycode_from_string(key_name)
+	if key != KEY_NONE:
+		_screenshot_key = key
+	_build_overlay()
 	connect_to_condensate()
 
 
@@ -172,6 +199,57 @@ func get_friends() -> Array:
 	return (await _request({"op": "list_friends"})).get("friends", [])
 
 
+## Host only: start or stop recording this lobby for feedback. While it's on, Condensate saves
+## everyone's voice chat (transcribed afterwards) and players can press the screenshot key
+## (F12 by default) to mark a moment. The game's developer gets it all in Condensate Studio.
+## Players can also start and stop it from the Condensate app.
+func set_feedback(on: bool) -> bool:
+	return (await _request({"op": "set_feedback", "on": on})).get("op") == "ok"
+
+
+func is_recording_feedback() -> bool:
+	return feedback_session != ""
+
+
+## Save a feedback screenshot of the current frame (what the screenshot key does). Only works
+## while the lobby is recording feedback. [param note] is saved with it.
+func take_feedback_screenshot(note := "") -> void:
+	if not is_recording_feedback() or _shooting:
+		return
+	_shooting = true
+	_overlay.visible = false
+	await RenderingServer.frame_post_draw
+	var texture := get_viewport().get_texture()
+	var image: Image = texture.get_image() if texture else null
+	_overlay.visible = true
+	_shooting = false
+	if image == null or image.is_empty():
+		error.emit("couldn't capture the screen")
+		return
+	if image.get_width() > _MAX_SHOT_WIDTH:
+		var h := int(image.get_height() * float(_MAX_SHOT_WIDTH) / image.get_width())
+		image.resize(_MAX_SHOT_WIDTH, h, Image.INTERPOLATE_BILINEAR)
+	var meta := {
+		"scene": get_tree().current_scene.scene_file_path if get_tree().current_scene else "",
+		"version": str(ProjectSettings.get_setting("application/config/version", "")),
+		"note": note,
+	}
+	if feedback_context.is_valid():
+		var context = feedback_context.call()
+		if context is Dictionary:
+			meta["context"] = context
+	var meta_bytes := JSON.stringify(meta).to_utf8_buffer()
+	var frame := PackedByteArray()
+	frame.resize(_HEADER + 4)
+	frame[5] = _MODE_SCREENSHOT
+	frame.encode_u32(_HEADER, meta_bytes.size())
+	frame.append_array(meta_bytes)
+	frame.append_array(image.save_jpg_to_buffer(0.85))
+	_ws.send(frame, WebSocketPeer.WRITE_MODE_BINARY)
+	_show_banner("Screenshot saved for feedback", 2.0)
+	screenshot_taken.emit()
+
+
 ## A MultiplayerPeer for the current lobby: assign it to [code]multiplayer.multiplayer_peer[/code].
 ## Make a new one for each lobby.
 func create_peer() -> CondensateMultiplayerPeer:
@@ -210,6 +288,68 @@ func _process(_delta: float) -> void:
 			_fail(last_error if last_error != "" else "Couldn't connect to Condensate. Is it running?")
 		else:
 			disconnected.emit()
+
+
+func _input(event: InputEvent) -> void:
+	if is_recording_feedback() and event is InputEventKey and event.pressed and not event.echo \
+			and event.keycode == _screenshot_key:
+		get_viewport().set_input_as_handled()
+		take_feedback_screenshot()
+
+
+# A small "recording" indicator in the corner, and a banner for announcements. Players must be
+# able to see when they're being recorded, so it's always shown while recording.
+func _build_overlay() -> void:
+	_overlay = CanvasLayer.new()
+	_overlay.layer = 128
+	add_child(_overlay)
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0, 0, 0, 0.6)
+	style.set_corner_radius_all(6)
+	style.set_content_margin_all(8)
+	_rec_label = Label.new()
+	_rec_label.add_theme_stylebox_override("normal", style)
+	_rec_label.add_theme_color_override("font_color", Color(1, 0.45, 0.45))
+	_rec_label.add_theme_font_size_override("font_size", 14)
+	_rec_label.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT, Control.PRESET_MODE_MINSIZE, 12)
+	_rec_label.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_rec_label.visible = false
+	_overlay.add_child(_rec_label)
+	_banner = Label.new()
+	_banner.add_theme_stylebox_override("normal", style)
+	_banner.add_theme_font_size_override("font_size", 16)
+	_banner.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_banner.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_banner.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP, Control.PRESET_MODE_MINSIZE, 48)
+	_banner.custom_minimum_size.x = 520
+	_banner.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_banner.visible = false
+	_overlay.add_child(_banner)
+
+
+func _set_feedback_session(session: String, by: String) -> void:
+	var was := feedback_session
+	feedback_session = session
+	var key := OS.get_keycode_string(_screenshot_key)
+	_rec_label.text = "● REC   %s: screenshot" % key
+	_rec_label.visible = session != ""
+	if session != "" and was == "":
+		var who := "%s started recording" % by if by != "" else "This lobby is recording"
+		_show_banner("%s for feedback. Your voice chat and %s screenshots go to the game's developer. You can opt out in the Condensate app." % [who, key], 8.0)
+	elif session == "" and was != "":
+		_show_banner("Feedback recording stopped", 3.0)
+	if session != was:
+		feedback_changed.emit(session != "", by)
+
+
+func _show_banner(text: String, seconds: float) -> void:
+	_banner.text = text
+	_banner.visible = true
+	_banner_timer = get_tree().create_timer(seconds, true, false, true)
+	var timer := _banner_timer
+	await timer.timeout
+	if _banner_timer == timer:
+		_banner.visible = false
 
 
 func _fail(message: String) -> void:
@@ -251,6 +391,9 @@ func _on_text(text: String) -> void:
 			lobby = m["lobby"]
 			member_id = int(m["you"])
 			lobby_joined.emit(lobby)
+			var session = lobby.get("feedback")
+			if session != null:
+				_set_feedback_session(str(session), "")
 		"member_joined":
 			if not lobby.is_empty():
 				lobby["members"].append(m["member"])
@@ -268,6 +411,17 @@ func _on_text(text: String) -> void:
 			if not lobby.is_empty():
 				lobby["data"] = m["data"]
 				lobby_data_changed.emit(m["data"])
+		"member_updated":
+			if not lobby.is_empty():
+				var updated: Dictionary = m["member"]
+				for i in lobby["members"].size():
+					if int(lobby["members"][i]["id"]) == int(updated["id"]):
+						lobby["members"][i] = updated
+		"feedback":
+			if not lobby.is_empty():
+				var session = m.get("session")
+				lobby["feedback"] = session
+				_set_feedback_session("" if session == null else str(session), str(m["by"]["display_name"]))
 		"lobby_closed":
 			_leave_local(str(m.get("reason", "left")))
 		"join_requested":
@@ -310,6 +464,7 @@ func _leave_local(reason: String) -> void:
 	lobby = {}
 	member_id = 0
 	_inbox.clear()
+	_set_feedback_session("", "")
 	if _peer:
 		_peer._lobby_ended()
 		_peer = null

@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use sqlx::SqlitePool;
 
 use crate::config::Config;
+use crate::feedback::Transcriber;
 use crate::hub::Hub;
 use crate::play::Play;
 use crate::storage::Storage;
@@ -17,11 +18,22 @@ pub struct AppState {
     pub login_limiter: Arc<LoginLimiter>,
     pub hub: Arc<Hub>,
     pub play: Arc<Play>,
+    pub transcriber: Transcriber,
 }
 
 impl AppState {
+    /// Also starts the feedback recorder and transcriber tasks.
     pub fn new(db: SqlitePool, storage: Storage, config: Arc<Config>) -> Self {
-        Self { db, storage: Arc::new(storage), config, login_limiter: Arc::new(LoginLimiter::default()), hub: Arc::new(Hub::default()), play: Arc::new(Play::default()) }
+        let (recorder, transcriber) = crate::feedback::start(db.clone(), config.data_dir.clone());
+        Self {
+            db,
+            storage: Arc::new(storage),
+            config,
+            login_limiter: Arc::new(LoginLimiter::default()),
+            hub: Arc::new(Hub::default()),
+            play: Arc::new(Play::new(recorder)),
+            transcriber,
+        }
     }
 }
 

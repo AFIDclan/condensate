@@ -21,11 +21,12 @@ pub struct Settings {
     /// Where this app was launched from, so the CLI can open it to log in. An AppImage has no
     /// fixed install folder for the CLI to look in.
     pub app_path: Option<PathBuf>,
+    pub voice: crate::voice::VoiceSettings,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { server: DEFAULT_SERVER.into(), token: None, username: None, library_dir: None, app_path: None }
+        Self { server: DEFAULT_SERVER.into(), token: None, username: None, library_dir: None, app_path: None, voice: Default::default() }
     }
 }
 

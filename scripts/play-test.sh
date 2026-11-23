@@ -21,6 +21,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# With CONDENSATE_WHISPER and CONDENSATE_WHISPER_MODEL set, the server transcribes feedback
+# recordings and the test checks the text.
 CONDENSATE_BIND="127.0.0.1:$PORT" CONDENSATE_DATA_DIR="$WORK/server" \
   "$BIN/condensate-server" serve >"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
@@ -51,7 +53,12 @@ if [ -n "${APP:-}" ]; then
   mkdir -p "$WORK/app/com.condensate.app"
   printf '{"server":"%s","token":"%s","username":"alice"}' "$CONDENSATE_SERVER" "$(token alice)" \
     >"$WORK/app/com.condensate.app/settings.json"
-  XDG_CONFIG_HOME="$WORK/app" XDG_DATA_HOME="$WORK/appdata" dbus-run-session -- xvfb-run -a "$APP" >"$WORK/app.log" 2>&1 &
+  # The app's "microphone": 3 s of silence, then a sentence (synthesised by ffmpeg's flite).
+  ffmpeg -loglevel error -f lavfi -i "anullsrc=r=16000:cl=mono:d=3" \
+    -f lavfi -i "flite=text='The jump on the second level is way too hard. I keep falling into the water.'" \
+    -filter_complex "[0][1]concat=n=2:v=0:a=1" -ar 48000 -ac 1 "$WORK/speech.wav"
+  CONDENSATE_VOICE_TEST_INPUT="$WORK/speech.wav" XDG_CONFIG_HOME="$WORK/app" XDG_DATA_HOME="$WORK/appdata" \
+    dbus-run-session -- xvfb-run -a "$APP" >"$WORK/app.log" 2>&1 &
   APP_FILE="$WORK/app/com.condensate.app/game-api.json"
   for _ in $(seq 100); do [ -f "$APP_FILE" ] && break; sleep 0.2; done
   [ -f "$APP_FILE" ] || { echo "FAIL: the app didn't write game-api.json"; cat "$WORK/app.log"; exit 1; }

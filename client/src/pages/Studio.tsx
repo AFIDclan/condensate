@@ -3,6 +3,7 @@ import { api, errorMessage, GameChanges, GameDetail, GameSummary, platformLabel,
 import { GameImage } from "../art";
 import { pickAndUploadImage, Spinner, useToast } from "../components";
 import { Icon } from "../icons";
+import { FeedbackCard } from "../feedback";
 
 /** Manage the games you publish: store page, artwork, versions and publish tokens. */
 export default function Studio({ server, openStorePage }: { server: string; openStorePage: (slug: string) => void }) {
@@ -242,6 +243,8 @@ function Editor({ slug, server, onChanged, openStorePage }: { slug: string; serv
         </div>
       </section>
 
+      <FeedbackCard slug={slug} />
+
       <Tokens slug={slug} />
 
       <AgentInstructions slug={slug} title={game.title} server={server} />
@@ -331,6 +334,14 @@ Condensate provides lobbies, friend invites and the networking, so the game need
 3. Host: await Condensate.create_lobby(), then multiplayer.multiplayer_peer = Condensate.create_peer(). Join: await Condensate.join_lobby(id), then create_peer() the same way.
 4. Connect Condensate.join_requested(lobby_id) to the join code: it fires when the player clicks Join on a friend or accepts an invite in Condensate.
 The host is peer 1, as with ENet, so RPCs, MultiplayerSpawner and MultiplayerSynchronizer work as usual.
+Voice chat needs no code: the Condensate app runs it for everyone in the lobby.
+Optional, for playtest feedback: set Condensate.feedback_context to a Callable that returns a Dictionary about the current moment (level, player position, ...). It's saved with every screenshot players take with F12 during a feedback recording.
+
+## Playtest feedback
+When we playtest, the lobby host can record feedback: everyone's voice chat, transcribed per player, plus screenshots players take with F12 at moments they want to point out.
+- condensate feedback list ${slug}  (recordings, newest first)
+- condensate feedback pull ${slug}  (saves the newest into ./feedback/<date>-<id>/ and prints the path of its transcript.md; add a recording id for an older one)
+transcript.md is a timeline of "[mm:ss] **Player:** what they said", with screenshots (shots/*.jpg) placed where they were taken and what the game reported about that moment. Read it together with the screenshots, summarise the problems and suggestions, and point to the code involved. Transcription is automatic, so some words may be misheard.
 
 ## If something fails
 - "not logged in": ask me to log in to the Condensate app, then run the command again.

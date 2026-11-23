@@ -488,3 +488,88 @@ pub async fn set_library_dir(state: State<'_, AppState>, path: String) -> CmdRes
     state.update_settings(|s| s.library_dir = Some(new))?;
     Ok(path)
 }
+
+// ---- voice chat and feedback recordings -------------------------------------------------------
+
+fn game_api(app: &AppHandle) -> Arc<GameApi> {
+    app.state::<Arc<GameApi>>().inner().clone()
+}
+
+/// The lobby a running game is in, and voice chat (also pushed as `voice-state` events).
+#[tauri::command]
+pub fn voice_state(app: AppHandle) -> crate::game_api::VoiceState {
+    game_api(&app).state()
+}
+
+#[tauri::command]
+pub fn voice_devices() -> crate::voice::Devices {
+    crate::voice::devices()
+}
+
+#[tauri::command]
+pub fn voice_settings(app: AppHandle) -> crate::voice::VoiceSettings {
+    game_api(&app).voice_settings.lock().unwrap().clone()
+}
+
+#[tauri::command]
+pub fn set_voice_settings(app: AppHandle, state: State<'_, AppState>, settings: crate::voice::VoiceSettings) -> CmdResult<()> {
+    let mut settings = settings;
+    settings.volume = settings.volume.clamp(0.0, 2.0);
+    settings.threshold_db = settings.threshold_db.clamp(-100.0, 0.0);
+    state.update_settings(|s| s.voice = settings.clone())?;
+    game_api(&app).apply_voice_settings(settings);
+    Ok(())
+}
+
+/// Run the microphone (meter only) for the settings page.
+#[tauri::command]
+pub fn mic_test(app: AppHandle, on: bool) {
+    game_api(&app).mic_test(on);
+}
+
+/// Host only: start or stop a feedback recording of the current lobby.
+#[tauri::command]
+pub fn set_feedback(app: AppHandle, on: bool) -> CmdResult<()> {
+    game_api(&app).set_feedback(on)
+}
+
+/// Include or leave out your voice from the current lobby's feedback recording.
+#[tauri::command]
+pub fn set_record_me(app: AppHandle, on: bool) -> CmdResult<()> {
+    game_api(&app).set_record_me(on)
+}
+
+#[tauri::command]
+pub async fn feedback_list(state: State<'_, AppState>, slug: String) -> CmdResult<Vec<FeedbackSummary>> {
+    state.client()?.feedback_list(&slug).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn feedback_detail(state: State<'_, AppState>, id: String) -> CmdResult<FeedbackDetail> {
+    state.client()?.feedback(&id).await.map_err(err)
+}
+
+/// A screenshot's bytes (the server needs a login, so `<img>` can't fetch it directly).
+#[tauri::command]
+pub async fn feedback_file(state: State<'_, AppState>, id: String, file: String) -> CmdResult<tauri::ipc::Response> {
+    let bytes = state.client()?.feedback_file(&id, &file).await.map_err(err)?;
+    Ok(tauri::ipc::Response::new(bytes.to_vec()))
+}
+
+#[tauri::command]
+pub async fn delete_feedback(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.client()?.delete_feedback(&id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn retranscribe_feedback(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.client()?.retranscribe_feedback(&id).await.map_err(err)
+}
+
+/// Save a recording (transcript, screenshots) into a folder; returns where.
+#[tauri::command]
+pub async fn export_feedback(state: State<'_, AppState>, id: String, dir: String) -> CmdResult<String> {
+    let client = state.client()?;
+    let out = condensate_sdk::feedback::export(&client, &id, std::path::Path::new(&dir)).await.map_err(err)?;
+    Ok(out.display().to_string())
+}

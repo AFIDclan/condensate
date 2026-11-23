@@ -91,6 +91,8 @@ Condensate provides lobbies, friend invites and a relay for game traffic, so a g
 
 The host is peer 1, as with ENet, so RPCs, `MultiplayerSpawner` and `MultiplayerSynchronizer` work unchanged. See `sdk/godot/addons/condensate/README.md` for the full API.
 
+Voice chat comes free: the Condensate app runs it for everyone in a lobby. For playtests, the host can record feedback, which saves transcribed voice chat plus screenshots players take with F12. Pull a recording with `condensate feedback pull <game>`. See [FEEDBACK.md](FEEDBACK.md).
+
 **Other engines:** the protocol is a WebSocket carrying JSON messages and binary packets; see `crates/core/src/play.rs`. When Condensate launches a game, it sets three environment variables:
 - `CONDENSATE_API`
 - `CONDENSATE_TOKEN`

@@ -1,4 +1,5 @@
 pub mod client;
+pub mod feedback;
 pub mod launch;
 pub mod login_store;
 pub mod pull;

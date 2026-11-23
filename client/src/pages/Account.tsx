@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as autostartEnabled } from "@tauri-apps/plugin-autostart";
 import { api, errorMessage, Invite, Session, timeAgo, User } from "../api";
 import { Avatar, pickAndUploadImage, useToast } from "../components";
+import { VoiceSettingsCard } from "../voice";
 import { checkForUpdate } from "../updater";
 
 export default function Account({ session, onLogout, onUserChanged }: { session: Session; onLogout: () => void; onUserChanged: (u: User) => void }) {
@@ -175,6 +176,8 @@ export default function Account({ session, onLogout, onUserChanged }: { session:
             </button>
           </div>
         </section>
+
+        <VoiceSettingsCard />
 
         <section className="card">
           <h2>This computer</h2>

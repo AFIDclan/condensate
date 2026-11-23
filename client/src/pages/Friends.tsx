@@ -98,7 +98,7 @@ export default function Friends({ me, initialChat }: { me: string; initialChat?:
                         social.joinLobby(f.presence.lobby!);
                       }}
                     >
-                      Join
+                      Join{f.presence.lobby.recording ? " · REC" : ""}
                     </span>
                   )}
                 </button>

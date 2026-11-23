@@ -3,8 +3,8 @@
 //! server restarts).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 
 use crate::auth::authenticate;
 use crate::error::{not_found, ApiResult};
+use crate::feedback::{create_session, Recorder};
 use crate::hub::broadcast_presence;
 use crate::routes::games::visible_to;
 use crate::routes::social::friend_ids;
@@ -29,16 +30,15 @@ use crate::state::AppState;
 /// dropped; unreliable packets are skipped instead.
 const OUTBOX: usize = 1024;
 
-#[derive(Default)]
 pub struct Play {
     inner: Mutex<Inner>,
 }
 
-#[derive(Default)]
 struct Inner {
     next_conn: u64,
     conns: HashMap<u64, Conn>,
     lobbies: HashMap<String, Lobby>,
+    recorder: Recorder,
 }
 
 struct Conn {
@@ -49,6 +49,10 @@ struct Conn {
     tx: Option<mpsc::Sender<Message>>,
     /// (lobby id, member id)
     lobby: Option<(String, u32)>,
+    /// Carries the player's voice (set by the Condensate app).
+    voice: bool,
+    /// Include this player's voice in feedback recordings.
+    recorded: bool,
 }
 
 struct Lobby {
@@ -62,6 +66,8 @@ struct Lobby {
     members: BTreeMap<u32, u64>,
     next_member: u32,
     invited: HashSet<i64>,
+    /// Feedback recording in progress: (session id, when it started).
+    feedback: Option<(Arc<str>, Instant)>,
 }
 
 impl Lobby {
@@ -77,7 +83,13 @@ impl Lobby {
     }
 
     fn presence(&self) -> PresenceLobby {
-        PresenceLobby { id: self.id.clone(), game: self.game.clone(), members: self.members.len() as u32, max_members: self.max_members }
+        PresenceLobby {
+            id: self.id.clone(),
+            game: self.game.clone(),
+            members: self.members.len() as u32,
+            max_members: self.max_members,
+            recording: self.feedback.is_some(),
+        }
     }
 }
 
@@ -102,21 +114,30 @@ impl Inner {
         self.conns.get(&conn).map(|c| c.user_id)
     }
 
+    fn member(&self, id: u32, conn: u64) -> Option<Member> {
+        let c = self.conns.get(&conn)?;
+        Some(Member { id, username: c.user.username.clone(), display_name: c.user.display_name.clone(), voice: c.voice, recorded: c.recorded })
+    }
+
     fn info(&self, lobby: &Lobby) -> LobbyInfo {
         LobbyInfo {
             id: lobby.id.clone(),
             game: lobby.game.slug.clone(),
             max_members: lobby.max_members,
             visibility: lobby.visibility,
-            members: lobby
-                .members
-                .iter()
-                .filter_map(|(id, c)| {
-                    let u = &self.conns.get(c)?.user;
-                    Some(Member { id: *id, username: u.username.clone(), display_name: u.display_name.clone() })
-                })
-                .collect(),
+            members: lobby.members.iter().filter_map(|(id, c)| self.member(*id, *c)).collect(),
             data: lobby.data.clone(),
+            feedback: lobby.feedback.as_ref().map(|(s, _)| s.to_string()),
+        }
+    }
+
+    /// Tell everyone in this connection's lobby (it included) about its voice/recording flags.
+    fn member_updated(&mut self, conn: u64) {
+        let Some((lobby_id, id)) = self.conns.get(&conn).and_then(|c| c.lobby.clone()) else { return };
+        let Some(member) = self.member(id, conn) else { return };
+        let everyone: Vec<u64> = self.lobbies.get(&lobby_id).map(|l| l.members.values().copied().collect()).unwrap_or_default();
+        for c in everyone {
+            self.event(c, &PlayEvent::MemberUpdated { member: member.clone() });
         }
     }
 
@@ -127,6 +148,9 @@ impl Inner {
         let mut affected: Vec<i64> = self.user_of(conn).into_iter().collect();
         if member == 1 {
             let Some(lobby) = self.lobbies.remove(&lobby_id) else { return affected };
+            if let Some((session, _)) = lobby.feedback.clone() {
+                self.recorder.stop_session(session);
+            }
             for other in lobby.others(1) {
                 if let Some(c) = self.conns.get_mut(&other) {
                     c.lobby = None;
@@ -157,6 +181,24 @@ impl Inner {
 }
 
 impl Play {
+    pub fn new(recorder: Recorder) -> Self {
+        Self { inner: Mutex::new(Inner { next_conn: 0, conns: HashMap::new(), lobbies: HashMap::new(), recorder }) }
+    }
+
+    /// Whether a lobby is recording this feedback session right now.
+    pub fn recording(&self, session: &str) -> bool {
+        self.with(|g| g.lobbies.values().any(|l| l.feedback.as_ref().is_some_and(|(s, _)| &**s == session)))
+    }
+
+    /// If this user is in the lobby recording `session`: milliseconds since recording started.
+    pub fn recording_member(&self, session: &str, user: i64) -> Option<i64> {
+        self.with(|g| {
+            let lobby = g.lobbies.values().find(|l| l.feedback.as_ref().is_some_and(|(s, _)| &**s == session))?;
+            let (_, started) = lobby.feedback.as_ref()?;
+            lobby.members.values().any(|c| g.user_of(*c) == Some(user)).then(|| started.elapsed().as_millis() as i64)
+        })
+    }
+
     fn with<R>(&self, f: impl FnOnce(&mut Inner) -> R) -> R {
         f(&mut self.inner.lock().unwrap())
     }
@@ -175,6 +217,11 @@ impl Play {
         let mut g = self.inner.lock().unwrap();
         let Some((lobby_id, me)) = g.conns.get(&conn).and_then(|c| c.lobby.clone()) else { return };
         let Some(lobby) = g.lobbies.get(&lobby_id) else { return };
+        match frame[5] {
+            MODE_VOICE => return relay_voice(&mut g, conn, &lobby_id, me, frame),
+            MODE_SCREENSHOT => return, // the app uploads these over HTTP
+            _ => {}
+        }
         let targets = match target {
             0 => lobby.others(me),
             t if t != me => lobby.members.get(&t).copied().into_iter().collect(),
@@ -186,6 +233,27 @@ impl Play {
         for t in targets {
             g.send(t, Message::Binary(out.clone()), mode == TransferMode::Reliable);
         }
+    }
+}
+
+/// Voice: to every other member whose connection carries voice (dropped, never queued, when they
+/// fall behind), and into the feedback recording.
+fn relay_voice(g: &mut Inner, conn: u64, lobby_id: &str, me: u32, frame: Bytes) {
+    let Some(c) = g.conns.get(&conn) else { return };
+    if !c.voice || frame.len() <= PACKET_HEADER {
+        return;
+    }
+    let (user, recorded) = (c.user_id, c.recorded);
+    let Some(lobby) = g.lobbies.get(lobby_id) else { return };
+    if let (Some((session, _)), true) = (&lobby.feedback, recorded) {
+        g.recorder.frame(session.clone(), user, frame.slice(PACKET_HEADER..));
+    }
+    let targets: Vec<u64> = lobby.others(me).into_iter().filter(|t| g.conns.get(t).is_some_and(|c| c.voice)).collect();
+    let mut out = BytesMut::from(&frame[..]);
+    out[0..4].copy_from_slice(&me.to_le_bytes());
+    let out = out.freeze();
+    for t in targets {
+        g.send(t, Message::Binary(out.clone()), false);
     }
 }
 
@@ -201,10 +269,15 @@ async fn refresh_presence(st: &AppState, mut users: Vec<i64>) {
     }
 }
 
-fn new_lobby_id() -> String {
+/// A random id that's easy to read out loud (no 0/o or 1/l/i).
+pub fn random_id(len: usize) -> String {
     const ALPHABET: &[u8] = b"23456789abcdefghjkmnpqrstuvwxyz";
     let mut rng = rand::thread_rng();
-    (0..10).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
+    (0..len).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
+}
+
+fn new_lobby_id() -> String {
+    random_id(10)
 }
 
 fn data_too_big(data: &Map<String, Value>) -> bool {
@@ -241,7 +314,7 @@ async fn run(st: AppState, user_id: i64, me: PlayUser, game: PresenceGame, socke
     let conn = st.play.with(|g| {
         g.next_conn += 1;
         let id = g.next_conn;
-        g.conns.insert(id, Conn { user_id, user: me, game, tx: Some(tx), lobby: None });
+        g.conns.insert(id, Conn { user_id, user: me, game, tx: Some(tx), lobby: None, voice: false, recorded: true });
         g.event(id, &welcome);
         id
     });
@@ -284,6 +357,20 @@ async fn handle(st: &AppState, conn: u64, user_id: i64, cmd: PlayCommand) {
     match cmd {
         PlayCommand::Ping => {}
 
+        PlayCommand::Voice { rid, on } => play.with(|g| {
+            g.conns.get_mut(&conn).unwrap().voice = on;
+            g.member_updated(conn);
+            g.event(conn, &PlayEvent::Ok { rid });
+        }),
+
+        PlayCommand::RecordMe { rid, on } => play.with(|g| {
+            g.conns.get_mut(&conn).unwrap().recorded = on;
+            g.member_updated(conn);
+            g.event(conn, &PlayEvent::Ok { rid });
+        }),
+
+        PlayCommand::SetFeedback { rid, on } => set_feedback(st, conn, user_id, rid, on).await,
+
         PlayCommand::CreateLobby { rid, max_members, visibility, data } => {
             if !(2..=MAX_MEMBERS).contains(&max_members) {
                 return play.error(conn, rid, format!("max_members must be between 2 and {MAX_MEMBERS}"));
@@ -305,6 +392,7 @@ async fn handle(st: &AppState, conn: u64, user_id: i64, cmd: PlayCommand) {
                     members: BTreeMap::from([(1, conn)]),
                     next_member: 2,
                     invited: HashSet::new(),
+                    feedback: None,
                 };
                 g.conns.get_mut(&conn).unwrap().lobby = Some((id.clone(), 1));
                 let info = g.info(&lobby);
@@ -441,7 +529,14 @@ async fn handle(st: &AppState, conn: u64, user_id: i64, cmd: PlayCommand) {
                     .filter(|l| l.can_join(user_id, &friends) && (l.members.len() as u32) < l.max_members)
                     .filter_map(|l| {
                         let host = g.conns.get(l.members.get(&1)?)?.user.clone();
-                        Some(LobbySummary { id: l.id.clone(), host, members: l.members.len() as u32, max_members: l.max_members, data: l.data.clone() })
+                        Some(LobbySummary {
+                            id: l.id.clone(),
+                            host,
+                            members: l.members.len() as u32,
+                            max_members: l.max_members,
+                            data: l.data.clone(),
+                            recording: l.feedback.is_some(),
+                        })
                     })
                     .collect();
                 g.event(conn, &PlayEvent::Lobbies { rid, lobbies });
@@ -476,6 +571,75 @@ async fn handle(st: &AppState, conn: u64, user_id: i64, cmd: PlayCommand) {
                 })
                 .collect();
             play.reply(conn, PlayEvent::Friends { rid, friends });
+        }
+    }
+}
+
+/// Host only: start or stop the lobby's feedback recording.
+async fn set_feedback(st: &AppState, conn: u64, user_id: i64, rid: Option<u64>, on: bool) {
+    let play = &st.play;
+    let check = play.with(|g| -> Result<(String, bool), &str> {
+        let (lobby_id, member) = g.conns[&conn].lobby.clone().ok_or("you're not in a lobby")?;
+        if member != 1 {
+            return Err("only the host can start or stop feedback recording");
+        }
+        let lobby = g.lobbies.get(&lobby_id).ok_or("you're not in a lobby")?;
+        Ok((lobby.game.slug.clone(), lobby.feedback.is_some()))
+    });
+    let (slug, recording) = match check {
+        Ok(c) => c,
+        Err(e) => return play.error(conn, rid, e),
+    };
+    if on == recording {
+        return play.reply(conn, PlayEvent::Ok { rid });
+    }
+    let session: Option<Arc<str>> = if on {
+        match create_session(&st.db, &slug, user_id).await {
+            Ok(id) => Some(id.into()),
+            Err(e) => {
+                tracing::warn!("feedback: can't create session: {e:#}");
+                return play.error(conn, rid, "couldn't start recording");
+            }
+        }
+    } else {
+        None
+    };
+    let users = play.with(|g| -> Option<Vec<i64>> {
+        let (lobby_id, member) = g.conns[&conn].lobby.clone()?;
+        let by = g.conns[&conn].user.clone();
+        let lobby = g.lobbies.get_mut(&lobby_id).filter(|_| member == 1)?;
+        match &session {
+            Some(s) if lobby.feedback.is_none() => {
+                let started = Instant::now();
+                lobby.feedback = Some((s.clone(), started));
+                g.recorder.start_session(s.clone(), started);
+            }
+            Some(_) => return None,
+            None => {
+                let (old, _) = lobby.feedback.take()?;
+                g.recorder.stop_session(old);
+            }
+        }
+        let everyone: Vec<u64> = g.lobbies[&lobby_id].members.values().copied().collect();
+        let event = PlayEvent::Feedback { session: session.as_ref().map(|s| s.to_string()), by };
+        let mut users = vec![];
+        for c in everyone {
+            users.extend(g.user_of(c));
+            g.event(c, &event);
+        }
+        Some(users)
+    });
+    match users {
+        Some(users) => {
+            play.reply(conn, PlayEvent::Ok { rid });
+            refresh_presence(st, users).await;
+        }
+        None => {
+            // The lobby changed while the session was being created.
+            if let Some(s) = session {
+                let _ = sqlx::query("DELETE FROM feedback_sessions WHERE id = ?").bind(&*s).execute(&st.db).await;
+            }
+            play.reply(conn, PlayEvent::Ok { rid });
         }
     }
 }

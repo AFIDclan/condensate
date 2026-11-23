@@ -1,6 +1,6 @@
 # Condensate multiplayer for Godot 4
 
-This addon lets players start or join a game with their Condensate friends. Condensate creates the lobbies, sends the invites, and carries the game traffic, so you don't need to run a server or set up port forwarding.
+This addon lets players start or join a game with their Condensate friends. Condensate creates the lobbies, sends the invites, and carries the game traffic, so you don't need to run a server or set up port forwarding. Players in a lobby also get voice chat, and playtests can be recorded for feedback.
 
 It is pure GDScript and needs Godot 4.3 or later.
 
@@ -60,6 +60,34 @@ The other players' signals behave as follows:
 - `error(message)`
 
 Requests are async (`await` them). If one fails, it returns an empty value and emits `error`.
+
+## Voice chat and feedback recordings
+
+**Voice chat needs no code.** The Condensate app runs it for everyone in the lobby. It sends only while someone talks, and has its own mute and deafen controls.
+
+The host can **record feedback** for a playtest, either from the app's voice panel or from the game with `await Condensate.set_feedback(true)`. While recording:
+- Everyone's voice chat is saved and later transcribed, per player.
+- Players press **F12** to save a screenshot of a moment they want to point out. To use another key, set **Project Settings → Condensate → Feedback Screenshot Key** (for example `F9`).
+- The addon shows a "● REC" indicator in the corner and announces when recording starts, so players always know. It hides itself in screenshots.
+
+Recordings appear in Condensate Studio for the game's owner, and `condensate feedback pull <game>` saves one as a Markdown timeline with the screenshots.
+
+To tell the developer where each screenshot was taken, set a context function:
+
+```gdscript
+Condensate.feedback_context = func(): return {"level": level_name, "position": str(player.global_position)}
+```
+
+| | |
+|---|---|
+| `set_feedback(on)` | Host only: start or stop a feedback recording. |
+| `is_recording_feedback()`, `feedback_session` | Whether a recording is running, and its id. |
+| `take_feedback_screenshot(note = "")` | What F12 does, for a "report a problem" button of your own. |
+| `feedback_context` | A Callable returning a Dictionary, saved with each screenshot. |
+
+**More signals:**
+- `feedback_changed(recording, by)`
+- `screenshot_taken`
 
 ## Notes
 
