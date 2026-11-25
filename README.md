@@ -90,8 +90,11 @@ On Linux, the .deb puts the `condensate` CLI in `/usr/bin`. The AppImage copies 
   - `downloads/` (public: installer and update feed)
   - `backups/`
 - **Nightly maintenance (04:30):** `condensate-maintenance.timer` snapshots the database into `backups/`, keeping 14, then deletes chunks and images that nothing references. Run it by hand with `sudo systemctl start condensate-maintenance`.
-- **Network:** the server listens on `127.0.0.1:8470`. Public access comes through Tailscale Funnel; WebSockets work through it.
-- **Settings:** in `/home/sean/condensate-server/condensate.env`: `CONDENSATE_NAME`, and `CONDENSATE_DIRECT_URL` for the direct fast path later.
+- **Network:** the server listens on `127.0.0.1:8470`. Public access comes through Tailscale Funnel; WebSockets work through it. This is the main address, which apps log in to.
+- **Direct address:** router port 7755 (TCP) is forwarded to oort, and the server serves the same API there over TLS. Downloads, uploads, the live connection and game traffic use it when it answers, and go through the main address otherwise. There's no domain, so the certificate is self-signed (`data/direct/`). The server advertises its fingerprint in `/api/v1/server`, which apps fetch over the main address, and they accept only that certificate. The server looks up its public IP every 10 minutes, so a new home IP is picked up automatically.
+  - **Firewall:** Tailscale's rules drop connections from `100.64.0.0/10`, the range ISPs use for carrier-grade NAT, which includes oort's own ISP. `condensate-firewall.service` (installed by `deploy-server.sh`) puts an ACCEPT rule for 7755 in front of them at boot and whenever tailscaled starts.
+  - **Check it:** `curl -k https://<public ip>:7755/api/v1/server`. In the app, **Account → This computer → Connection** says "Direct" when it's in use.
+- **Settings:** in `/home/sean/condensate-server/condensate.env`: `CONDENSATE_NAME`, `CONDENSATE_DIRECT_PORT=7755` (turns on the direct address), and optionally `CONDENSATE_DIRECT_URL` to advertise a fixed address instead of the looked-up IP.
 - **Admin commands:**
   ```sh
   export CONDENSATE_DATA_DIR=~/condensate-server/data

@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod db;
+mod direct;
 mod error;
 mod feedback;
 mod housekeeping;
@@ -22,7 +23,9 @@ use crate::storage::Storage;
 
 /// Condensate server. Configured with environment variables:
 /// CONDENSATE_BIND (default 127.0.0.1:8470), CONDENSATE_DATA_DIR (default ./data),
-/// CONDENSATE_NAME, CONDENSATE_DIRECT_URL. Feedback transcription: CONDENSATE_WHISPER (path to
+/// CONDENSATE_NAME. Direct address (a port forward that skips the main URL's proxy):
+/// CONDENSATE_DIRECT_PORT (serve TLS on all interfaces on this port), CONDENSATE_DIRECT_URL
+/// (the address to advertise; looked up from the public IP when unset). Feedback transcription: CONDENSATE_WHISPER (path to
 /// whisper.cpp's whisper-cli), CONDENSATE_WHISPER_MODEL (a ggml model file),
 /// CONDENSATE_WHISPER_LANGUAGE (default auto), CONDENSATE_FFMPEG (default ffmpeg).
 #[derive(Parser)]
@@ -69,8 +72,12 @@ async fn main() -> Result<()> {
 
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => {
-            let state = AppState::new(db, Storage::new(&config.data_dir)?, Arc::new(config.clone()));
+            let (direct, direct_starter) = direct::prepare(&config)?;
+            let state = AppState::new(db, Storage::new(&config.data_dir)?, Arc::new(config.clone()), direct);
             let app = routes::router(state);
+            if let Some(starter) = direct_starter {
+                starter.start(app.clone()).await?;
+            }
             let listener = tokio::net::TcpListener::bind(config.bind).await?;
             tracing::info!("Condensate server listening on http://{}", config.bind);
             axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())

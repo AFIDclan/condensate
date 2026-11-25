@@ -44,6 +44,13 @@ pub struct Session {
     platform: Option<&'static str>,
 }
 
+/// Whether the app is talking to the server's direct address (a port forward) right now,
+/// rather than the main URL. Changes are announced with the `connection` event.
+#[tauri::command]
+pub fn connection_direct(app: AppHandle) -> bool {
+    crate::route::is_direct(&app)
+}
+
 #[tauri::command]
 pub async fn session(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Session> {
     state.reload();

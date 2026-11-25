@@ -76,7 +76,8 @@ async fn server_info(State(st): State<AppState>) -> ApiResult<Json<ServerInfo>> 
     Ok(Json(ServerInfo {
         name: st.config.name.clone(),
         server_version: env!("CARGO_PKG_VERSION").into(),
-        direct_url: st.config.direct_url.clone(),
+        direct_url: st.direct.url().filter(|_| st.direct.cert.is_some()),
+        direct_cert: st.direct.cert.clone(),
         needs_invite: true,
     }))
 }

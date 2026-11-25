@@ -1,4 +1,5 @@
 pub mod client;
+pub mod direct;
 pub mod feedback;
 pub mod launch;
 pub mod login_store;
@@ -7,6 +8,8 @@ pub mod push;
 
 pub use client::{ApiError, Client};
 pub use condensate_core as core;
+/// The TLS library behind [`Client::ws_tls`], for WebSocket connectors.
+pub use rustls;
 
 /// Retry a fallible async operation a few times with a short backoff. Chunk transfers go over
 /// home internet and tunnels, so the occasional dropped connection is expected.

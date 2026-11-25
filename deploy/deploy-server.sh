@@ -12,7 +12,11 @@ cd ~/condensate
 mkdir -p ~/condensate-server/bin ~/condensate-server/data
 install -m 755 target/release/condensate-server target/release/condensate ~/condensate-server/bin/
 changed=0
-for unit in condensate.service condensate-maintenance.service condensate-maintenance.timer; do
+if ! cmp -s deploy/condensate-firewall.sh /usr/local/sbin/condensate-firewall; then
+  sudo install -m 755 deploy/condensate-firewall.sh /usr/local/sbin/condensate-firewall
+  changed=1
+fi
+for unit in condensate.service condensate-maintenance.service condensate-maintenance.timer condensate-firewall.service; do
   if ! cmp -s "deploy/$unit" "/etc/systemd/system/$unit"; then
     sudo install -m 644 "deploy/$unit" "/etc/systemd/system/$unit"
     changed=1
@@ -22,6 +26,8 @@ if [ "$changed" = 1 ]; then
   sudo systemctl daemon-reload
   sudo systemctl enable condensate
   sudo systemctl enable --now condensate-maintenance.timer
+  sudo systemctl enable condensate-firewall.service
+  sudo systemctl start --no-block condensate-firewall.service
 fi
 sudo systemctl restart condensate
 sleep 1

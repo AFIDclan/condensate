@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use condensate_sdk::direct::DirectLink;
 use condensate_sdk::Client;
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +51,8 @@ pub struct AppState {
     pub running: Mutex<HashMap<String, u32>>,
     /// The live connection's generation and outbox (see realtime.rs).
     pub realtime: Mutex<Option<(u64, tokio::sync::mpsc::UnboundedSender<condensate_core::api::WsCommand>)>>,
+    /// The server's direct address and the server URL it belongs to (see route.rs).
+    pub direct: Mutex<Option<(String, Arc<DirectLink>)>>,
 }
 
 impl AppState {
@@ -66,6 +69,7 @@ impl AppState {
             jobs: Mutex::new(HashMap::new()),
             running: Mutex::new(HashMap::new()),
             realtime: Mutex::new(None),
+            direct: Mutex::new(None),
         }
     }
 
@@ -103,7 +107,13 @@ impl AppState {
     pub fn client(&self) -> CmdResult<Client> {
         let s = self.settings.lock().unwrap();
         let token = s.token.clone().ok_or_else(|| crate::commands::NOT_LOGGED_IN.to_string())?;
-        Client::new(&s.server, Some(token)).map_err(|e| e.to_string())
+        let client = Client::new(&s.server, Some(token)).map_err(|e| e.to_string())?;
+        Ok(client.with_direct(self.direct_for(&s.server)))
+    }
+
+    /// The direct address for this server, if one has been found.
+    pub fn direct_for(&self, server: &str) -> Option<Arc<DirectLink>> {
+        self.direct.lock().unwrap().as_ref().filter(|(s, _)| s == server).map(|(_, d)| d.clone())
     }
 
     pub fn library_dir(&self) -> PathBuf {

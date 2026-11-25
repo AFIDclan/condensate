@@ -43,10 +43,9 @@ fn current(app: &AppHandle, generation: u64) -> bool {
 async fn run(app: AppHandle, generation: u64, mut outbox: UnboundedReceiver<WsCommand>) {
     let mut backoff = Duration::from_secs(1);
     while current(&app, generation) {
-        let url = app.state::<AppState>().client().ok().and_then(|c| c.ws_url());
-        let Some(url) = url else { return };
-        match tokio_tungstenite::connect_async(url.as_str()).await {
-            Ok((socket, _)) => {
+        let Ok(client) = app.state::<AppState>().client() else { return };
+        match crate::route::connect_ws(&client, |url| url).await {
+            Ok(socket) => {
                 backoff = Duration::from_secs(1);
                 let _ = app.emit("realtime", true);
                 let (mut sink, mut stream) = socket.split();

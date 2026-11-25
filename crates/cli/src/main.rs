@@ -602,9 +602,9 @@ async fn push_cmd(ctx: &Ctx, args: PushArgs) -> Result<()> {
         (args.game.unwrap_or(project.game), builds, project.server)
     };
 
-    let client = ctx.client_for(project_server.as_deref()).await?;
-    sync_art(&client, &game, &art).await?;
     let quiet = ctx.json;
+    let client = use_direct(ctx.client_for(project_server.as_deref()).await?, quiet).await;
+    sync_art(&client, &game, &art).await?;
     let report = condensate_sdk::push::push(
         &client,
         PushOptions { game, version: args.version, changelog: args.changelog, builds },
@@ -625,6 +625,20 @@ async fn push_cmd(ctx: &Ctx, args: PushArgs) -> Result<()> {
         );
     });
     Ok(())
+}
+
+/// Upload through the server's direct address when it works from here (it's faster than the
+/// main URL). Falls back to the main URL quietly.
+async fn use_direct(client: Client, quiet: bool) -> Client {
+    match condensate_sdk::direct::discover(&client).await {
+        Ok(Some(link)) if link.is_up() => {
+            if !quiet {
+                eprintln!("Using the server's direct connection");
+            }
+            client.with_direct(Some(link))
+        }
+        _ => client,
+    }
 }
 
 fn push_progress(e: PushEvent) {

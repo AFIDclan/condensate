@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as autostartEnabled } from "@tauri-apps/plugin-autostart";
 import { api, errorMessage, Invite, Session, timeAgo, User } from "../api";
@@ -16,6 +17,13 @@ export default function Account({ session, onLogout, onUserChanged }: { session:
   const [libraryDir, setLibraryDir] = useState(session.library_dir);
   const [autostart, setAutostart] = useState<boolean | null>(null);
   const [version, setVersion] = useState("");
+  const [direct, setDirect] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    api.connectionDirect().then(setDirect).catch(() => {});
+    const off = listen<boolean>("connection", (e) => setDirect(e.payload));
+    return () => { off.then((f) => f()); };
+  }, []);
 
   useEffect(() => {
     api.listInvites().then(setInvites).catch((e) => toast("error", errorMessage(e)));
@@ -182,6 +190,9 @@ export default function Account({ session, onLogout, onUserChanged }: { session:
         <section className="card">
           <h2>This computer</h2>
           <div className="kv"><span>Server</span><code>{session.server}</code></div>
+          {direct !== null && (
+            <div className="kv"><span>Connection</span><span>{direct ? "Direct (faster)" : "Through the main address"}</span></div>
+          )}
           <div className="kv"><span>Platform</span><code>{session.platform ?? "unsupported"}</code></div>
           <div className="row">
             <button className="plain-btn danger" onClick={onLogout}>Log out</button>

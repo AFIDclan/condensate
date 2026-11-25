@@ -240,6 +240,8 @@ export type FeedbackTimeline = Omit<FeedbackSummary, "utterances" | "shots"> & {
 
 export const api = {
   session: () => invoke<Session>("session"),
+  /** True while the app talks to the server's direct address (port forward); see the `connection` event. */
+  connectionDirect: () => invoke<boolean>("connection_direct"),
   login: (server: string, username: string, password: string) =>
     invoke<User>("login", { server, username, password }),
   register: (server: string, username: string, password: string, invite: string) =>

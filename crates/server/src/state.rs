@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use sqlx::SqlitePool;
 
 use crate::config::Config;
+use crate::direct::DirectInfo;
 use crate::feedback::Transcriber;
 use crate::hub::Hub;
 use crate::play::Play;
@@ -19,11 +20,12 @@ pub struct AppState {
     pub hub: Arc<Hub>,
     pub play: Arc<Play>,
     pub transcriber: Transcriber,
+    pub direct: Arc<DirectInfo>,
 }
 
 impl AppState {
     /// Also starts the feedback recorder and transcriber tasks.
-    pub fn new(db: SqlitePool, storage: Storage, config: Arc<Config>) -> Self {
+    pub fn new(db: SqlitePool, storage: Storage, config: Arc<Config>, direct: Arc<DirectInfo>) -> Self {
         let (recorder, transcriber) = crate::feedback::start(db.clone(), config.data_dir.clone());
         Self {
             db,
@@ -33,6 +35,7 @@ impl AppState {
             hub: Arc::new(Hub::default()),
             play: Arc::new(Play::new(recorder)),
             transcriber,
+            direct,
         }
     }
 }

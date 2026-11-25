@@ -8,10 +8,16 @@ publish.workspace = true
 [dependencies]
 condensate-core.workspace = true
 anyhow.workspace = true
+blake3.workspace = true
 bytes.workspace = true
 dirs.workspace = true
 futures.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+tokio-rustls.workspace = true

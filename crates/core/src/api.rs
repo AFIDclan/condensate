@@ -19,8 +19,12 @@ pub struct OkResponse {
 pub struct ServerInfo {
     pub name: String,
     pub server_version: String,
-    /// Faster address for bulk chunk downloads, when the server has one (e.g. a port forward).
+    /// A faster address for the same API (a port forward), e.g. `https://203.0.113.5:7755`.
     pub direct_url: Option<String>,
+    /// Hex BLAKE3 of the direct address's self-signed certificate (DER). Clients accept only
+    /// this certificate there; they learn it from this response, fetched over the main URL.
+    #[serde(default)]
+    pub direct_cert: Option<String>,
     /// Registration always needs an invite code.
     pub needs_invite: bool,
 }

@@ -481,13 +481,13 @@ async fn serve(app: AppHandle, api: Arc<GameApi>, stream: TcpStream) {
     // Log in to the server's play socket as the current user.
     let state = app.state::<AppState>();
     state.reload(); // the CLI may have logged in since
-    let url = state.client().ok().and_then(|c| c.ws_url()).map(|u| u.replacen("/api/v1/ws?", "/api/v1/play?", 1) + "&game=" + &slug);
-    let Some(url) = url else {
+    let Ok(client) = state.client() else {
         let _ = game.send(error_text("log in to Condensate to play online")).await;
         return;
     };
-    let server = match tokio_tungstenite::connect_async(url.as_str()).await {
-        Ok((s, _)) => s,
+    let play_url = |u: String| u.replacen("/api/v1/ws?", "/api/v1/play?", 1) + "&game=" + &slug;
+    let server = match crate::route::connect_ws(&client, play_url).await {
+        Ok(s) => s,
         Err(e) => {
             let message = match e {
                 WsError::Http(r) if r.status() == 404 => format!("Condensate has no game called \"{slug}\" (check the game id)"),

@@ -1,0 +1,13 @@
+[Unit]
+Description=Let the Condensate direct port past Tailscale's firewall rules
+After=network-online.target tailscaled.service
+
+[Service]
+Type=oneshot
+# Tailscale sets up its rules a few seconds after it starts; insert ours in front afterwards.
+ExecStartPre=/bin/sleep 10
+ExecStart=/usr/local/sbin/condensate-firewall 7755
+
+[Install]
+# Runs at boot and again whenever tailscaled (re)starts.
+WantedBy=multi-user.target tailscaled.service

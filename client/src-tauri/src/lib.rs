@@ -1,6 +1,7 @@
 mod commands;
 mod game_api;
 mod realtime;
+mod route;
 mod state;
 mod voice;
 
@@ -31,6 +32,7 @@ pub fn run() {
             let voice_settings = state.settings.lock().unwrap().voice.clone();
             app.manage(state);
             app.manage(game_api::start(app.handle(), &config_dir, voice_settings)?);
+            route::start(app.handle());
             #[cfg(target_os = "linux")]
             std::thread::spawn(install_cli_from_appimage);
             // Launched at sign-in ("Start with Windows"): stay out of the way.
@@ -43,6 +45,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::session,
+            commands::connection_direct,
             commands::login,
             commands::register,
             commands::logout,

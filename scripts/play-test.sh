@@ -5,12 +5,15 @@
 #      (its local game API), logged in as alice. Needs xvfb-run and dbus-run-session;
 #   3. with GODOT=/path/to/godot (4.3+): three headless copies of the Godot addon's self-test
 #      playing together through the server.
+# With DIRECT=1 the server also serves its direct address (TLS, self-signed) on another port; the
+# test checks that the app and `condensate push` use it.
 # Run from the repo root on Linux after `cargo build`. Needs Node 22+.
 set -euo pipefail
 
 BIN="$(pwd)/target/debug"
 WORK="$(mktemp -d)"
 PORT=18471
+DIRECT_PORT=18472
 GAME=condensate-demo
 export CONDENSATE_SERVER="http://127.0.0.1:$PORT"
 export CONDENSATE_PASSWORD="correct horse battery"
@@ -23,6 +26,9 @@ trap cleanup EXIT
 
 # With CONDENSATE_WHISPER and CONDENSATE_WHISPER_MODEL set, the server transcribes feedback
 # recordings and the test checks the text.
+if [ -n "${DIRECT:-}" ]; then
+  export CONDENSATE_DIRECT_PORT=$DIRECT_PORT CONDENSATE_DIRECT_URL="https://127.0.0.1:$DIRECT_PORT"
+fi
 CONDENSATE_BIND="127.0.0.1:$PORT" CONDENSATE_DATA_DIR="$WORK/server" \
   "$BIN/condensate-server" serve >"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
@@ -62,6 +68,21 @@ if [ -n "${APP:-}" ]; then
   APP_FILE="$WORK/app/com.condensate.app/game-api.json"
   for _ in $(seq 100); do [ -f "$APP_FILE" ] && break; sleep 0.2; done
   [ -f "$APP_FILE" ] || { echo "FAIL: the app didn't write game-api.json"; cat "$WORK/app.log"; exit 1; }
+fi
+
+if [ -n "${DIRECT:-}" ]; then
+  echo "== direct address"
+  check() { if eval "$2"; then echo "  ok   $1"; else echo "  FAIL $1"; exit 1; fi; }
+  INFO=$(curl -sf "$CONDENSATE_SERVER/api/v1/server")
+  check "the server advertises its direct address" 'echo "$INFO" | grep -q "\"direct_url\":\"https://127.0.0.1:$DIRECT_PORT\""'
+  check "the API answers over TLS on the direct port" 'curl -sfk "https://127.0.0.1:$DIRECT_PORT/api/v1/server" | grep -q server_version'
+  mkdir -p "$WORK/build" && printf '#!/bin/sh\necho hi\n' >"$WORK/build/run.sh"
+  PUSH=$(cs alice push --dir "$WORK/build" --game "$GAME" --platform linux-x64 --exe run.sh -m "Direct test" 2>&1)
+  check "condensate push uploads over the direct address" 'echo "$PUSH" | grep -q "direct connection" && echo "$PUSH" | grep -q Published'
+  if [ -n "${APP:-}" ]; then
+    for _ in $(seq 50); do ss -tn state established "( dport = :$DIRECT_PORT )" | grep -q 127.0.0.1 && break; sleep 0.2; done
+    check "the app connects over the direct address" 'ss -tn state established "( dport = :$DIRECT_PORT )" | grep -q 127.0.0.1'
+  fi
 fi
 
 echo "== protocol"

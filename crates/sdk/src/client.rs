@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -6,6 +7,8 @@ use condensate_core::api::*;
 use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+
+use crate::direct::DirectLink;
 
 /// An error response from the server.
 #[derive(Debug, Clone)]
@@ -29,6 +32,8 @@ pub struct Client {
     http: reqwest::Client,
     base: String,
     token: Option<String>,
+    /// Used instead of `base` while it's up; see [`crate::direct`].
+    direct: Option<Arc<DirectLink>>,
 }
 
 impl Client {
@@ -38,11 +43,42 @@ impl Client {
             .connect_timeout(Duration::from_secs(15))
             .read_timeout(Duration::from_secs(60))
             .build()?;
-        Ok(Self { http, base: server.trim_end_matches('/').to_string(), token })
+        Ok(Self { http, base: server.trim_end_matches('/').to_string(), token, direct: None })
     }
 
+    /// Send requests to the server's direct address while it works (see [`crate::direct`]).
+    pub fn with_direct(mut self, direct: Option<Arc<DirectLink>>) -> Self {
+        self.direct = direct;
+        self
+    }
+
+    /// This client without the direct address.
+    pub fn origin(&self) -> Client {
+        Client { direct: None, ..self.clone() }
+    }
+
+    /// The direct address, when this client is using it right now.
+    pub fn direct(&self) -> Option<&Arc<DirectLink>> {
+        self.direct.as_ref().filter(|d| d.is_up())
+    }
+
+    /// TLS settings for a WebSocket to [`Client::ws_url`]: Some for the direct address (its
+    /// certificate is pinned), None for the main URL (normal certificate checks).
+    pub fn ws_tls(&self) -> Option<Arc<rustls::ClientConfig>> {
+        self.direct().map(|d| d.tls())
+    }
+
+    /// The main server URL, which the user logged in to.
     pub fn server(&self) -> &str {
         &self.base
+    }
+
+    /// Where requests go right now: the direct address or the main URL.
+    fn route(&self) -> (&reqwest::Client, &str) {
+        match self.direct() {
+            Some(d) => (&d.http, &d.base),
+            None => (&self.http, &self.base),
+        }
     }
 
     pub fn token(&self) -> Option<&str> {
@@ -54,7 +90,8 @@ impl Client {
     }
 
     fn req(&self, method: Method, path: &str) -> RequestBuilder {
-        let rb = self.http.request(method, format!("{}/api/v1{}", self.base, path));
+        let (http, base) = self.route();
+        let rb = http.request(method, format!("{base}/api/v1{path}"));
         match &self.token {
             Some(t) => rb.bearer_auth(t),
             None => rb,
@@ -62,7 +99,27 @@ impl Client {
     }
 
     async fn send_raw(&self, rb: RequestBuilder) -> Result<reqwest::Response> {
-        let resp = rb.send().await.with_context(|| format!("could not reach {}", self.base))?;
+        let (http, req) = rb.build_split();
+        let req = req?;
+        let direct = self.direct().filter(|d| req.url().as_str().starts_with(&d.base));
+        let resp = match direct {
+            None => http.execute(req).await.with_context(|| format!("could not reach {}", self.base))?,
+            Some(d) => {
+                // If the direct address stops answering, retry once over the main URL.
+                let retry = req.try_clone();
+                match http.execute(req).await {
+                    Ok(resp) => resp,
+                    Err(e) if e.is_connect() || e.is_timeout() => {
+                        d.mark_down();
+                        let Some(mut retry) = retry else { return Err(anyhow::Error::new(e).context("lost the direct connection")) };
+                        let url = retry.url().as_str().replacen(&d.base, &self.base, 1);
+                        *retry.url_mut() = url.parse()?;
+                        self.http.execute(retry).await.with_context(|| format!("could not reach {}", self.base))?
+                    }
+                    Err(e) => return Err(anyhow::Error::new(e).context(format!("could not reach {}", d.base))),
+                }
+            }
+        };
         let status = resp.status();
         if status.is_success() {
             return Ok(resp);
@@ -268,7 +325,7 @@ impl Client {
     /// WebSocket URL for live events (presence, messages).
     pub fn ws_url(&self) -> Option<String> {
         let token = self.token.as_deref()?;
-        let base = self.base.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
+        let base = self.route().1.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
         Some(format!("{base}/api/v1/ws?token={token}"))
     }
 
