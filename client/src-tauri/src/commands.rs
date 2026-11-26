@@ -121,6 +121,7 @@ pub async fn register(
 #[tauri::command]
 pub async fn logout(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
     crate::realtime::stop(&app);
+    game_api(&app).leave_room();
     if let Ok(client) = state.client() {
         let _ = client.logout().await;
     }
@@ -149,9 +150,10 @@ pub struct LibraryItem {
 }
 
 #[tauri::command]
-pub async fn library(state: State<'_, AppState>) -> CmdResult<Vec<LibraryItem>> {
+pub async fn library(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Vec<LibraryItem>> {
     let client = state.client()?;
     let entries = client.library(platform::current()).await.map_err(err)?;
+    game_api(&app).remember_titles(entries.iter().map(|e| (e.game.slug.clone(), e.game.title.clone())));
     let jobs = state.jobs.lock().unwrap().clone();
     let running = state.running.lock().unwrap().clone();
     Ok(entries
@@ -312,8 +314,14 @@ pub async fn join_lobby(app: AppHandle, state: State<'_, AppState>, slug: String
 }
 
 fn start_game(app: AppHandle, state: &AppState, slug: String, join: Option<String>) -> CmdResult<()> {
-    if state.running.lock().unwrap().contains_key(&slug) {
-        return Err("already running".into());
+    // Reserve the game before starting it (pid 0 until it has one). Starting a process can take
+    // a moment on Windows, and a double-click's second click must not launch a second copy.
+    {
+        let mut running = state.running.lock().unwrap();
+        if running.contains_key(&slug) {
+            return Err("The game is already running.".into());
+        }
+        running.insert(slug.clone(), 0);
     }
     let dir = state.game_dir(&slug);
     let api = app.state::<Arc<GameApi>>().inner().clone();
@@ -322,6 +330,7 @@ fn start_game(app: AppHandle, state: &AppState, slug: String, join: Option<Strin
         Ok(child) => child,
         Err(e) => {
             api.forget_launch(&launch_token);
+            state.running.lock().unwrap().remove(&slug);
             return Err(err(e));
         }
     };
@@ -544,6 +553,28 @@ pub fn set_feedback(app: AppHandle, on: bool) -> CmdResult<()> {
 #[tauri::command]
 pub fn set_record_me(app: AppHandle, on: bool) -> CmdResult<()> {
     game_api(&app).set_record_me(on)
+}
+
+/// Start a voice room (no game needed) and join it as host.
+#[tauri::command]
+pub async fn room_start(app: AppHandle) -> CmdResult<()> {
+    game_api(&app).open_room(None).await
+}
+
+/// Join a friend's voice room.
+#[tauri::command]
+pub async fn room_join(app: AppHandle, room: String) -> CmdResult<()> {
+    game_api(&app).open_room(Some(room)).await
+}
+
+#[tauri::command]
+pub fn room_leave(app: AppHandle) {
+    game_api(&app).leave_room();
+}
+
+#[tauri::command]
+pub fn room_invite(app: AppHandle, user: String) -> CmdResult<()> {
+    game_api(&app).invite_to_room(&user)
 }
 
 #[tauri::command]

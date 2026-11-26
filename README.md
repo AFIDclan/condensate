@@ -54,7 +54,7 @@ The app can later route traffic over faster paths, such as direct connections be
 - **Godot addon:** `sdk/godot`
 - **Tests:** `bash scripts/play-test.sh` on oort. Set `GODOT=/path/to/godot` to also run three headless Godot copies playing together.
 
-Lobbies also get **voice chat**, run by the app with no game code. The host can start a **feedback recording**: per-player voice transcripts (Whisper on the server) plus F12 screenshots, for the game's owner or their AI agent (`condensate feedback pull <game>`). See [docs/FEEDBACK.md](docs/FEEDBACK.md), including the one-time `deploy/install-whisper.sh` setup.
+Lobbies also get **voice chat**, run by the app with no game code. Friends can also start a **voice room** from the Friends page: voice without a game, which keeps running while they play. The host can start a **feedback recording**: per-player voice transcripts (Whisper on the server) plus F12 screenshots, for the game's owner or their AI agent (`condensate feedback pull <game>`). See [docs/FEEDBACK.md](docs/FEEDBACK.md), including the one-time `deploy/install-whisper.sh` setup.
 
 ## Desktop client
 

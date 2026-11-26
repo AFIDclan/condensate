@@ -4,10 +4,11 @@ import { Avatar, Spinner, useToast } from "../components";
 import { Icon } from "../icons";
 import { useContextMenu } from "../menu";
 import { useSocial } from "../social";
+import { useVoiceState, VoiceRoomCard } from "../voice";
 
 export function presenceText(f: Friend): string {
   if (f.presence.status === "in_game") return `Playing ${f.presence.game?.title ?? "a game"}`;
-  if (f.presence.status === "online") return "Online";
+  if (f.presence.status === "online") return f.presence.room ? "In a voice room" : "Online";
   return f.presence.last_seen_at ? `Last seen ${timeAgo(f.presence.last_seen_at)}` : "Offline";
 }
 
@@ -17,6 +18,16 @@ export default function Friends({ me, initialChat }: { me: string; initialChat?:
   const menu = useContextMenu();
   const [chat, setChat] = useState<string | null>(initialChat ?? null);
   const data = social.friends;
+  const voice = useVoiceState();
+  const myRoom = voice?.room ? voice.lobby : null;
+  const inMyRoom = (f: Friend) => !!myRoom && !!voice?.members.some((m) => m.username === f.user.username);
+  const canJoinRoom = (f: Friend) => !!f.presence.room && f.presence.room.id !== myRoom;
+  const canInvite = (f: Friend) => !!myRoom && f.presence.status !== "offline" && !inMyRoom(f) && f.presence.room?.id !== myRoom;
+  const invite = (f: Friend) =>
+    api.roomInvite(f.user.username).then(
+      () => toast("info", `Invited ${f.user.display_name} to your voice room`),
+      (e) => toast("error", errorMessage(e)),
+    );
 
   const act = async (f: () => Promise<void>) => {
     try {
@@ -35,6 +46,7 @@ export default function Friends({ me, initialChat }: { me: string; initialChat?:
     <div className="friends">
       <aside className="friends-side">
         <AddFriend onAdded={() => social.refreshFriends()} />
+        <VoiceRoomCard />
         {!data && <Spinner />}
         {data && data.incoming.length > 0 && (
           <section>
@@ -72,6 +84,8 @@ export default function Friends({ me, initialChat }: { me: string; initialChat?:
                   onContextMenu={(e) =>
                     menu.open(e, [
                       ...(f.presence.lobby ? [{ label: `Join in ${f.presence.lobby.game.title}`, icon: "play" as const, onClick: () => social.joinLobby(f.presence.lobby!) }] : []),
+                      ...(canJoinRoom(f) ? [{ label: "Join voice room", icon: "headphones" as const, onClick: () => social.joinRoom(f.presence.room!) }] : []),
+                      ...(canInvite(f) ? [{ label: "Invite to voice room", icon: "plus" as const, onClick: () => invite(f) }] : []),
                       { label: "Message", icon: "notes", onClick: () => setChat(f.user.username) },
                       {
                         label: "Remove friend",
@@ -99,6 +113,32 @@ export default function Friends({ me, initialChat }: { me: string; initialChat?:
                       }}
                     >
                       Join{f.presence.lobby.recording ? " · REC" : ""}
+                    </span>
+                  )}
+                  {canJoinRoom(f) && (
+                    <span
+                      className="join-chip"
+                      role="button"
+                      title={`Join ${f.user.display_name}'s voice room`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        social.joinRoom(f.presence.room!);
+                      }}
+                    >
+                      Voice{f.presence.room!.recording ? " · REC" : ""}
+                    </span>
+                  )}
+                  {canInvite(f) && !canJoinRoom(f) && (
+                    <span
+                      className="join-chip ghost"
+                      role="button"
+                      title={`Invite ${f.user.display_name} to your voice room`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        invite(f);
+                      }}
+                    >
+                      Invite
                     </span>
                   )}
                 </button>
@@ -201,6 +241,7 @@ function AddFriend({ onAdded }: { onAdded: () => void }) {
 
 function Chat({ friend, me }: { friend: Friend; me: string }) {
   const social = useSocial();
+  const voice = useVoiceState();
   const toast = useToast();
   const [messages, setMessages] = useState<ChatMessage[] | null>(null);
   const [draft, setDraft] = useState("");
@@ -254,6 +295,11 @@ function Chat({ friend, me }: { friend: Friend; me: string }) {
         {friend.presence.lobby && (
           <button className="plain-btn join-btn" onClick={() => social.joinLobby(friend.presence.lobby!)}>
             Join game · {friend.presence.lobby.members}/{friend.presence.lobby.max_members}
+          </button>
+        )}
+        {friend.presence.room && !(voice?.room && voice.lobby === friend.presence.room.id) && (
+          <button className="plain-btn outline join-btn" onClick={() => social.joinRoom(friend.presence.room!)}>
+            Join voice · {friend.presence.room.members}
           </button>
         )}
       </header>

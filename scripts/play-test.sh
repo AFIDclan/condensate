@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Multiplayer test: a throwaway server and three friends (alice, bob, carol), then
-#   1. the protocol test (scripts/play-test.mjs): lobbies, invites, relay, kick;
+#   1. the protocol test (scripts/play-test.mjs): lobbies, invites, relay, kick, voice, feedback
+#      recordings and voice rooms;
 #   2. with APP=/path/to/condensate-client: the same through a headless copy of the desktop app
 #      (its local game API), logged in as alice. Needs xvfb-run and dbus-run-session;
 #   3. with GODOT=/path/to/godot (4.3+): three headless copies of the Godot addon's self-test

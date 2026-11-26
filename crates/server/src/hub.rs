@@ -8,7 +8,7 @@ use std::time::Duration;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::response::Response;
-use condensate_core::api::{Presence, PresenceGame, PresenceLobby, WsCommand, WsEvent};
+use condensate_core::api::{Presence, PresenceGame, PresenceLobby, PresenceRoom, WsCommand, WsEvent};
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -29,6 +29,8 @@ struct Inner {
     playing: HashMap<i64, PresenceGame>,
     /// A lobby each user is in that their friends can join (kept by play.rs).
     lobby: HashMap<i64, PresenceLobby>,
+    /// A voice room each user is in that their friends can join (kept by play.rs).
+    room: HashMap<i64, PresenceRoom>,
     next_id: u64,
 }
 
@@ -82,6 +84,19 @@ impl Hub {
         true
     }
 
+    /// Returns true when it changed.
+    pub fn set_room(&self, user: i64, room: Option<PresenceRoom>) -> bool {
+        let mut g = self.inner.lock().unwrap();
+        if g.room.get(&user) == room.as_ref() {
+            return false;
+        }
+        match room {
+            Some(r) => g.room.insert(user, r),
+            None => g.room.remove(&user),
+        };
+        true
+    }
+
     pub fn presence(&self, user: i64, last_seen_at: i64) -> Presence {
         let g = self.inner.lock().unwrap();
         let online = g.conns.contains_key(&user);
@@ -93,6 +108,7 @@ impl Hub {
             game,
             last_seen_at: if online { now() } else { last_seen_at },
             lobby,
+            room: g.room.get(&user).cloned(),
         }
     }
 

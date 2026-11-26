@@ -48,9 +48,9 @@ export function FeedbackCard({ slug }: { slug: string }) {
     <section className="card">
       <h2>Playtest feedback</h2>
       <p className="dim">
-        When you host a lobby, press <b>Record feedback</b> in the voice panel. Everyone's voice chat is saved and transcribed per player, and
-        players press F12 to screenshot moments they want to point out. Hand a recording to your AI agent and it can read what people said
-        and saw.
+        Start a voice room on the Friends page (or host a game's lobby), launch the game, and press <b>Record feedback</b> in the voice panel.
+        Everyone's voice chat is saved and transcribed per player, and players press F12 to screenshot moments they want to point out (games
+        using the Condensate addon). Hand a recording to your AI agent and it can read what people said and saw.
       </p>
       {!list && <Spinner />}
       {list?.length === 0 && <p className="dim small">No recordings yet.</p>}

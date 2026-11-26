@@ -68,7 +68,8 @@ var member_id := 0
 var launched_by_condensate := false
 ## The last connection problem, for showing to the player.
 var last_error := ""
-## The lobby's feedback recording id while one is running, else empty.
+## The feedback recording id while one includes this game (this lobby's, or the player's voice
+## room's in the Condensate app), else empty.
 var feedback_session := ""
 ## Optional: a Callable returning a Dictionary about the current moment (level, position, ...).
 ## It's saved with each feedback screenshot so the developer knows where it was taken.
@@ -87,6 +88,10 @@ var _rec_label: Label
 var _banner: Label
 var _banner_timer: SceneTreeTimer
 var _shooting := false
+# Feedback recordings that include this game: its own lobby's, and the Condensate app's voice
+# room's (when the room's host is recording this game). Either one turns recording on.
+var _lobby_session := ""
+var _room_session := ""
 
 
 func _ready() -> void:
@@ -212,7 +217,8 @@ func is_recording_feedback() -> bool:
 
 
 ## Save a feedback screenshot of the current frame (what the screenshot key does). Only works
-## while the lobby is recording feedback. [param note] is saved with it.
+## while feedback is being recorded (by this lobby, or by the player's voice room in the
+## Condensate app). [param note] is saved with it.
 func take_feedback_screenshot(note := "") -> void:
 	if not is_recording_feedback() or _shooting:
 		return
@@ -327,6 +333,10 @@ func _build_overlay() -> void:
 	_overlay.add_child(_banner)
 
 
+func _update_feedback(by: String) -> void:
+	_set_feedback_session(_lobby_session if _lobby_session != "" else _room_session, by)
+
+
 func _set_feedback_session(session: String, by: String) -> void:
 	var was := feedback_session
 	feedback_session = session
@@ -334,7 +344,7 @@ func _set_feedback_session(session: String, by: String) -> void:
 	_rec_label.text = "● REC   %s: screenshot" % key
 	_rec_label.visible = session != ""
 	if session != "" and was == "":
-		var who := "%s started recording" % by if by != "" else "This lobby is recording"
+		var who := "%s started recording" % by if by != "" else "Recording"
 		_show_banner("%s for feedback. Your voice chat and %s screenshots go to the game's developer. You can opt out in the Condensate app." % [who, key], 8.0)
 	elif session == "" and was != "":
 		_show_banner("Feedback recording stopped", 3.0)
@@ -392,8 +402,8 @@ func _on_text(text: String) -> void:
 			member_id = int(m["you"])
 			lobby_joined.emit(lobby)
 			var session = lobby.get("feedback")
-			if session != null:
-				_set_feedback_session(str(session), "")
+			_lobby_session = "" if session == null else str(session)
+			_update_feedback("")
 		"member_joined":
 			if not lobby.is_empty():
 				lobby["members"].append(m["member"])
@@ -421,7 +431,13 @@ func _on_text(text: String) -> void:
 			if not lobby.is_empty():
 				var session = m.get("session")
 				lobby["feedback"] = session
-				_set_feedback_session("" if session == null else str(session), str(m["by"]["display_name"]))
+				_lobby_session = "" if session == null else str(session)
+				_update_feedback(str(m["by"]["display_name"]))
+		"room_feedback":
+			# From the app: the voice room is recording this game (or stopped).
+			var session = m.get("session")
+			_room_session = "" if session == null else str(session)
+			_update_feedback(str(m.get("by", "")))
 		"lobby_closed":
 			_leave_local(str(m.get("reason", "left")))
 		"join_requested":
@@ -464,7 +480,8 @@ func _leave_local(reason: String) -> void:
 	lobby = {}
 	member_id = 0
 	_inbox.clear()
-	_set_feedback_session("", "")
+	_lobby_session = ""
+	_update_feedback("")
 	if _peer:
 		_peer._lobby_ended()
 		_peer = null

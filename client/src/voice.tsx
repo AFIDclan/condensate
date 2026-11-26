@@ -3,8 +3,9 @@ import { listen } from "@tauri-apps/api/event";
 import { api, errorMessage, VoiceSettings, VoiceState } from "./api";
 import { useToast } from "./components";
 import { Icon } from "./icons";
+import { useSocial } from "./social";
 
-/** The lobby a running game is in and its voice chat, kept up to date by the app. */
+/** The voice room or game lobby you're in and its voice chat, kept up to date by the app. */
 export function useVoiceState(): VoiceState | null {
   const [state, setState] = useState<VoiceState | null>(null);
   useEffect(() => {
@@ -41,31 +42,46 @@ function useVoiceSettings() {
   return [settings, change] as const;
 }
 
+const ROOM_CLOSED: Record<string, string> = {
+  host_left: "The host ended the voice room",
+  kicked: "You were removed from the voice room",
+  disconnected: "Lost the connection to the voice room",
+};
+
 /**
- * Shown while a game is in a multiplayer lobby: who's there and who's talking, mute and
- * deafen, and (for the host) feedback recording.
+ * Shown while you're in a voice room or a game's multiplayer lobby: who's there and who's
+ * talking, mute and deafen, and (for the host) feedback recording.
  */
 export function VoiceDock() {
   const toast = useToast();
   const state = useVoiceState();
   const [, change] = useVoiceSettings();
   const [open, setOpen] = useState(true);
+  const [inviting, setInviting] = useState(false);
 
   useEffect(() => {
     const a = listen<string>("voice-error", (e) => toast("error", e.payload));
-    const b = listen<{ session: string | null; by: string }>("feedback-changed", (e) =>
-      toast("info", e.payload.session ? `${e.payload.by} started recording this game for feedback` : `${e.payload.by} stopped the feedback recording`),
+    const b = listen<{ session: string | null; by: string; game: string | null }>("feedback-changed", (e) =>
+      toast(
+        "info",
+        e.payload.session
+          ? `${e.payload.by} started recording ${e.payload.game ?? "this game"} for feedback`
+          : `${e.payload.by} stopped the feedback recording`,
+      ),
     );
+    const c = listen<string>("room-closed", (e) => toast("info", ROOM_CLOSED[e.payload] ?? "The voice room closed"));
     return () => {
       a.then((f) => f());
       b.then((f) => f());
+      c.then((f) => f());
     };
   }, [toast]);
 
   if (!state?.lobby) return null;
   const me = state.members.find((m) => m.you);
   const recording = !!state.feedback;
-  const { muted, deafened } = state;
+  const { muted, deafened, room } = state;
+  const recordingWhat = state.feedback_game?.title ?? state.game?.title ?? "this game";
 
   const run = (f: () => Promise<void>) => f().catch((e) => toast("error", errorMessage(e)));
 
@@ -74,8 +90,14 @@ export function VoiceDock() {
       <button className="voice-head" onClick={() => setOpen((o) => !o)}>
         <span className={`voice-dot ${state.connected ? "on" : ""}`} />
         <span className="voice-title">
-          <b>{state.game?.title ?? "Game"}</b>
-          <span>{recording ? "Recording for feedback" : state.connected ? `Voice · ${state.members.length} in lobby` : "Lobby"}</span>
+          <b>{room ? "Voice room" : (state.game?.title ?? "Game")}</b>
+          <span>
+            {recording
+              ? `Recording ${recordingWhat} for feedback`
+              : state.connected
+                ? `Voice · ${state.members.length} in ${room ? "room" : "lobby"}`
+                : "Lobby"}
+          </span>
         </span>
         <Icon name="chevron" size={14} className={open ? "voice-chev open" : "voice-chev"} />
       </button>
@@ -94,11 +116,12 @@ export function VoiceDock() {
               </div>
             ))}
           </div>
+          {room && inviting && <InviteList members={state.members.map((m) => m.username)} onDone={() => setInviting(false)} />}
           {recording && me && (
             <div className="voice-rec">
               <span>
                 {me.recorded
-                  ? "Your voice and F12 screenshots are saved for the game's developer."
+                  ? `Your voice and F12 screenshots are saved for the developer of ${recordingWhat}.`
                   : "Your voice is left out of this recording."}
               </span>
               <button className="text-btn small" onClick={() => run(() => api.setRecordMe(!me.recorded))}>
@@ -114,9 +137,32 @@ export function VoiceDock() {
             <button className={`voice-btn ${deafened ? "off" : ""}`} onClick={() => change({ deafened: !deafened })} title={deafened ? "Undeafen" : "Deafen"}>
               <Icon name={deafened ? "headphones-off" : "headphones"} size={17} />
             </button>
+            {room && (
+              <>
+                <button className={`voice-btn ${inviting ? "active" : ""}`} onClick={() => setInviting((i) => !i)} title="Invite friends">
+                  <Icon name="plus" size={17} />
+                </button>
+                <button className="voice-btn" onClick={() => run(api.roomLeave)} title={state.host ? "Leave and end the voice room" : "Leave the voice room"}>
+                  <Icon name="x" size={17} />
+                </button>
+              </>
+            )}
             <span className="grow" />
             {state.host ? (
-              <button className={`rec-btn ${recording ? "on" : ""}`} onClick={() => run(() => api.setFeedback(!recording))}>
+              <button
+                className={`rec-btn ${recording ? "on" : ""}`}
+                disabled={room && !recording && !state.record_game}
+                title={
+                  recording
+                    ? undefined
+                    : room
+                      ? state.record_game
+                        ? `Record everyone's voice and F12 screenshots for the developer of ${state.record_game.title}`
+                        : "Start a game first, then record feedback for it"
+                      : "Record everyone's voice and F12 screenshots for the game's developer"
+                }
+                onClick={() => run(() => api.setFeedback(!recording))}
+              >
                 <span className="rec-dot" />
                 {recording ? "Stop recording" : "Record feedback"}
               </button>
@@ -130,6 +176,85 @@ export function VoiceDock() {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/** Online friends who aren't in the room yet, to invite. */
+function InviteList({ members, onDone }: { members: string[]; onDone: () => void }) {
+  const toast = useToast();
+  const social = useSocial();
+  const [sent, setSent] = useState<string[]>([]);
+  const candidates = (social.friends?.friends ?? []).filter((f) => f.presence.status !== "offline" && !members.includes(f.user.username));
+  return (
+    <div className="voice-invite">
+      {candidates.length === 0 && <span className="dim small">No friends online to invite.</span>}
+      {candidates.map((f) => (
+        <button
+          key={f.user.username}
+          className="voice-invite-row"
+          disabled={sent.includes(f.user.username)}
+          onClick={() =>
+            api.roomInvite(f.user.username).then(
+              () => setSent((s) => [...s, f.user.username]),
+              (e) => toast("error", errorMessage(e)),
+            )
+          }
+        >
+          <span className="voice-avatar">{f.user.display_name.slice(0, 1).toUpperCase()}</span>
+          <span className="voice-name">{f.user.display_name}</span>
+          <span className="voice-tag">{sent.includes(f.user.username) ? "Invited" : "Invite"}</span>
+        </button>
+      ))}
+      <button className="text-btn small" onClick={onDone}>
+        Done
+      </button>
+    </div>
+  );
+}
+
+/** Start a voice room, or show the one you're in (Friends page). */
+export function VoiceRoomCard() {
+  const toast = useToast();
+  const state = useVoiceState();
+  const [busy, setBusy] = useState(false);
+  if (state?.room && state.lobby) {
+    return (
+      <div className="room-card">
+        <div className="room-card-text">
+          <b>You're in a voice room</b>
+          <span className="dim small">
+            {state.members.length} {state.members.length === 1 ? "person" : "people"} · invite friends with the + in the voice panel
+          </span>
+        </div>
+        <button className="text-btn small danger" onClick={() => api.roomLeave().catch(() => {})}>
+          Leave
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="room-card">
+      <div className="room-card-text">
+        <b>Voice room</b>
+        <span className="dim small">Talk with friends before you pick a game. It keeps going while you play.</span>
+      </div>
+      <button
+        className="plain-btn outline small-btn"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          try {
+            await api.roomStart();
+          } catch (e) {
+            toast("error", errorMessage(e));
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        {busy ? "Starting…" : "Start"}
+      </button>
     </div>
   );
 }
@@ -159,8 +284,8 @@ export function VoiceSettingsCard() {
     <section className="card">
       <h2>Voice chat</h2>
       <p className="dim">
-        Voice chat starts on its own when you're in a multiplayer lobby, and only sends while you talk. Headphones work best: with speakers,
-        your friends may hear themselves echo.
+        Voice chat starts on its own when you're in a voice room (start one on the Friends page) or a game's multiplayer lobby, and only sends
+        while you talk. Headphones work best: with speakers, your friends may hear themselves echo.
       </p>
       <label className="field">
         Microphone

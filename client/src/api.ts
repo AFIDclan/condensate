@@ -109,6 +109,18 @@ export interface Presence {
   last_seen_at: number;
   /** A multiplayer lobby of theirs you can join. */
   lobby: PresenceLobby | null;
+  /** A voice room of theirs you can join. */
+  room?: PresenceRoom | null;
+}
+
+/** A voice room: a lobby with no game, for talking before and while playing. */
+export interface PresenceRoom {
+  id: string;
+  /** The host's display name. */
+  host: string;
+  members: number;
+  max_members: number;
+  recording?: boolean;
 }
 
 export interface Friend {
@@ -142,7 +154,8 @@ export type WsEvent =
   | { type: "presence"; user: string; presence: Presence }
   | { type: "message"; message: ChatMessage }
   | { type: "friends_changed" }
-  | { type: "lobby_invite"; from: string; from_name: string; lobby: PresenceLobby };
+  | { type: "lobby_invite"; from: string; from_name: string; lobby: PresenceLobby }
+  | { type: "room_invite"; from: string; from_name: string; room: PresenceRoom };
 
 export interface TokenInfo {
   id: number;
@@ -162,13 +175,19 @@ export interface GameChanges {
   banner_image?: string;
 }
 
-/** The lobby a running game is in, and voice chat (from the `voice-state` event). */
+/** The voice room or game lobby you're in, and voice chat (from the `voice-state` event). */
 export interface VoiceState {
   game: { slug: string; title: string } | null;
   lobby: string | null;
+  /** The lobby is a voice room rather than a game's lobby. */
+  room: boolean;
   host: boolean;
   members: VoiceMember[];
   feedback: string | null;
+  /** The game being recorded. */
+  feedback_game: { slug: string; title: string } | null;
+  /** In a room: the game you're playing, which "Record feedback" would record. */
+  record_game: { slug: string; title: string } | null;
   connected: boolean;
   muted: boolean;
   deafened: boolean;
@@ -285,6 +304,10 @@ export const api = {
   micTest: (on: boolean) => invoke<void>("mic_test", { on }),
   setFeedback: (on: boolean) => invoke<void>("set_feedback", { on }),
   setRecordMe: (on: boolean) => invoke<void>("set_record_me", { on }),
+  roomStart: () => invoke<void>("room_start"),
+  roomJoin: (room: string) => invoke<void>("room_join", { room }),
+  roomLeave: () => invoke<void>("room_leave"),
+  roomInvite: (user: string) => invoke<void>("room_invite", { user }),
   feedbackList: (slug: string) => invoke<FeedbackSummary[]>("feedback_list", { slug }),
   feedbackDetail: (id: string) => invoke<FeedbackTimeline>("feedback_detail", { id }),
   feedbackFile: (id: string, file: string) => invoke<ArrayBuffer>("feedback_file", { id, file }),

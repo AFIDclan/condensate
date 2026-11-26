@@ -13,6 +13,10 @@
 //!   plays and captures audio itself (`voice.rs`), so games need no audio code;
 //! - show the lobby in its own UI, where the host can start a feedback recording;
 //! - upload feedback screenshots the game sends (over HTTP, so they don't hold up game traffic).
+//!
+//! The app can also hold a **voice room** itself: a play connection with no game, so friends can
+//! talk before launching anything. While in a room, voice runs there rather than in a game's
+//! lobby, and the room's host can record feedback for the game they're playing.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -28,7 +32,8 @@ use rand::Rng;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
@@ -37,6 +42,8 @@ use crate::voice::{self, VoiceSettings};
 
 /// Request ids the app uses for its own commands; replies to these aren't passed to the game.
 const APP_RID: u64 = 1 << 40;
+/// Most people in a voice room.
+const ROOM_SIZE: u32 = 16;
 
 pub struct GameApi {
     /// `ws://127.0.0.1:<port>/`
@@ -48,6 +55,8 @@ pub struct GameApi {
     next_id: AtomicU64,
     pub voice_settings: Arc<Mutex<VoiceSettings>>,
     voice: Mutex<VoiceLink>,
+    /// Game titles by id, from the library, for naming games launched without the addon.
+    titles: Mutex<HashMap<String, String>>,
     app: AppHandle,
 }
 
@@ -59,7 +68,10 @@ struct Launch {
 
 struct GameConn {
     id: u64,
+    /// Empty for the voice room connection.
     slug: String,
+    /// The app's own voice room connection (no game on the other end).
+    room: bool,
     /// Messages for the game that come from the app rather than the server.
     to_game: UnboundedSender<Message>,
     /// Messages for the server that come from the app rather than the game.
@@ -68,6 +80,8 @@ struct GameConn {
     you: Option<PlayUser>,
     /// The lobby this connection is in, and its member id there.
     lobby: Option<(LobbyInfo, u32)>,
+    /// The voice room recording this game, as last told to the game.
+    room_feedback: Option<String>,
 }
 
 /// Which connection carries voice, and the audio running for it.
@@ -86,10 +100,16 @@ struct VoiceLink {
 pub struct VoiceState {
     pub game: Option<PresenceGame>,
     pub lobby: Option<String>,
+    /// The lobby is a voice room rather than a game's lobby.
+    pub room: bool,
     pub host: bool,
     pub members: Vec<VoiceMember>,
     /// Feedback recording in progress.
     pub feedback: Option<String>,
+    /// The game being recorded.
+    pub feedback_game: Option<PresenceGame>,
+    /// In a room: the game you're playing, which "Record feedback" would record.
+    pub record_game: Option<PresenceGame>,
     /// Voice is running (in a lobby).
     pub connected: bool,
     pub muted: bool,
@@ -154,9 +174,106 @@ impl GameApi {
         c.to_server.send(command(cmd)).map_err(|_| "the game disconnected".to_string())
     }
 
-    /// Host only: start or stop recording feedback in the current lobby.
+    /// Remember game titles (from the library) to name running games.
+    pub fn remember_titles(&self, games: impl IntoIterator<Item = (String, String)>) {
+        self.titles.lock().unwrap().extend(games);
+    }
+
+    /// The game this player is playing: one connected to multiplayer, else one Condensate
+    /// launched.
+    fn playing(&self, conns: &[GameConn]) -> Option<PresenceGame> {
+        if let Some(game) = conns.iter().filter(|c| !c.room).find_map(|c| c.game.clone()) {
+            return Some(game);
+        }
+        let state = self.app.state::<AppState>();
+        let slug = state.running.lock().unwrap().keys().min().cloned()?;
+        let title = self.titles.lock().unwrap().get(&slug).cloned().unwrap_or_else(|| slug.clone());
+        Some(PresenceGame { slug, title })
+    }
+
+    /// Host only: start or stop recording feedback in the current lobby. In a voice room it
+    /// records the game you're playing.
     pub fn set_feedback(&self, on: bool) -> Result<(), String> {
-        self.on_voice_conn(serde_json::json!({ "op": "set_feedback", "on": on, "rid": APP_RID }))
+        let in_room = {
+            let conns = self.conns.lock().unwrap();
+            let voice = self.voice.lock().unwrap().conn;
+            conns.iter().any(|c| c.room && Some(c.id) == voice)
+        };
+        let mut cmd = serde_json::json!({ "op": "set_feedback", "on": on, "rid": APP_RID });
+        if in_room && on {
+            let game = self.playing(&self.conns.lock().unwrap()).ok_or("Start the game first, then record feedback for it.")?;
+            cmd["game"] = game.slug.into();
+        }
+        self.on_voice_conn(cmd)
+    }
+
+    /// Start a voice room (`join: None`) or join a friend's. Leaves the room you're in, if any.
+    pub async fn open_room(self: &Arc<Self>, join: Option<String>) -> Result<(), String> {
+        // Already there (rejoining would drop this connection, ending the room if you host it).
+        if let Some(id) = &join {
+            let conns = self.conns.lock().unwrap();
+            if conns.iter().any(|c| c.room && c.lobby.as_ref().is_some_and(|(l, _)| &l.id == id)) {
+                return Ok(());
+            }
+        }
+        let state = self.app.state::<AppState>();
+        state.reload(); // the CLI may have logged in since
+        let client = state.client()?;
+        let server = crate::route::connect_ws(&client, |u| u.replacen("/api/v1/ws?", "/api/v1/play?", 1))
+            .await
+            .map_err(|e| format!("can't reach the Condensate server: {e}"))?;
+        let first = match &join {
+            None => serde_json::json!({ "op": "create_lobby", "rid": APP_RID, "max_members": ROOM_SIZE, "visibility": "friends" }),
+            Some(lobby) => serde_json::json!({ "op": "join_lobby", "rid": APP_RID, "lobby": lobby }),
+        };
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (to_game, _) = unbounded_channel::<Message>(); // nothing on the other end
+        let (to_server, for_server) = unbounded_channel::<Message>();
+        let _ = to_server.send(command(first));
+        self.leave_room();
+        self.conns.lock().unwrap().push(GameConn {
+            id,
+            slug: String::new(),
+            room: true,
+            to_game,
+            to_server,
+            game: None,
+            you: None,
+            lobby: None,
+            room_feedback: None,
+        });
+        let (ready_tx, ready_rx) = oneshot::channel();
+        tauri::async_runtime::spawn(run_room(self.clone(), id, server, for_server, ready_tx));
+        match tokio::time::timeout(Duration::from_secs(10), ready_rx).await {
+            Ok(Ok(result)) => result,
+            _ => {
+                self.leave_room();
+                Err("the server didn't answer".into())
+            }
+        }
+    }
+
+    /// Leave the voice room (it closes for everyone if you're its host).
+    pub fn leave_room(&self) {
+        let mut left = false;
+        for c in self.conns.lock().unwrap().iter_mut().filter(|c| c.room) {
+            let _ = c.to_server.send(Message::Close(None));
+            left |= c.lobby.take().is_some();
+        }
+        if left {
+            self.update_voice();
+            self.sync_room_feedback("");
+            self.emit_state(false);
+        }
+    }
+
+    /// Invite a friend to your voice room.
+    pub fn invite_to_room(&self, user: &str) -> Result<(), String> {
+        let conns = self.conns.lock().unwrap();
+        let c = conns.iter().find(|c| c.room && c.lobby.is_some()).ok_or("Start a voice room first.")?;
+        c.to_server
+            .send(command(serde_json::json!({ "op": "invite", "user": user, "rid": APP_RID })))
+            .map_err(|_| "the voice room disconnected".to_string())
     }
 
     /// Include (or leave out) this player's voice in the lobby's feedback recordings.
@@ -190,12 +307,19 @@ impl GameApi {
         link.test = (on && link.session.is_none()).then(|| voice::Session::start(self.voice_settings.clone(), None));
     }
 
-    /// Run voice for one connection that's in a lobby (the first, if several are), or stop it.
+    /// Run voice for one connection that's in a lobby, or stop it. The voice room comes first;
+    /// otherwise stay on the current connection, else take the first game in a lobby.
     fn update_voice(&self) {
         let conns = self.conns.lock().unwrap();
         let mut link = self.voice.lock().unwrap();
-        let current = link.conn.filter(|id| conns.iter().any(|c| c.id == *id && c.lobby.is_some()));
-        if current.is_some() && link.session.is_some() {
+        let in_lobby = |id: u64| conns.iter().any(|c| c.id == id && c.lobby.is_some());
+        let want = conns
+            .iter()
+            .find(|c| c.room && c.lobby.is_some())
+            .map(|c| c.id)
+            .or(link.conn.filter(|id| in_lobby(*id)))
+            .or_else(|| conns.iter().find(|c| c.lobby.is_some()).map(|c| c.id));
+        if want.is_some() && want == link.conn && link.session.is_some() {
             return;
         }
         // Stop voice on a connection that left its lobby.
@@ -205,7 +329,7 @@ impl GameApi {
             }
             link.session = None;
         }
-        let Some(c) = conns.iter().find(|c| c.lobby.is_some()) else { return };
+        let Some(c) = want.and_then(|id| conns.iter().find(|c| c.id == id)) else { return };
         link.test = None;
         let _ = c.to_server.send(command(serde_json::json!({ "op": "voice", "on": true, "rid": APP_RID })));
         let to_server = c.to_server.clone();
@@ -223,8 +347,13 @@ impl GameApi {
         let conns = self.conns.lock().unwrap();
         let link = self.voice.lock().unwrap();
         let s = self.voice_settings.lock().unwrap().clone();
-        // The voice connection's lobby, else any connection's.
-        let conn = link.conn.and_then(|id| conns.iter().find(|c| c.id == id)).or_else(|| conns.iter().find(|c| c.lobby.is_some()));
+        // The voice connection's lobby, else the room's, else any connection's.
+        let conn = link
+            .conn
+            .and_then(|id| conns.iter().find(|c| c.id == id))
+            .or_else(|| conns.iter().find(|c| c.room && c.lobby.is_some()))
+            .or_else(|| conns.iter().find(|c| c.lobby.is_some()));
+        let room = conn.is_some_and(|c| c.room);
         let speaking = link.session.as_ref().map(|v| v.speaking()).unwrap_or_default();
         let meters = link.session.as_ref().or(link.test.as_ref()).map(|v| v.meters.clone());
         let talking = meters.as_ref().is_some_and(|m| m.speaking.load(Ordering::Relaxed));
@@ -235,6 +364,7 @@ impl GameApi {
         VoiceState {
             game: conn.and_then(|c| c.game.clone()),
             lobby: lobby.map(|l| l.id.clone()),
+            room,
             host: you == 1,
             members: lobby
                 .map(|l| {
@@ -253,6 +383,8 @@ impl GameApi {
                 })
                 .unwrap_or_default(),
             feedback: lobby.and_then(|l| l.feedback.clone()),
+            feedback_game: lobby.and_then(|l| l.feedback_game.clone()),
+            record_game: if room { self.playing(&conns) } else { None },
             connected: link.session.is_some(),
             muted: s.muted,
             deafened: s.deafened,
@@ -291,12 +423,13 @@ impl GameApi {
             }
         }
         let mut lobby_changed = true;
+        let mut by_name = String::new();
         let pass = self
             .with_conn(id, |c| {
                 match event {
                     PlayEvent::Welcome { you, game } => {
                         c.you = Some(you);
-                        c.game = Some(game);
+                        c.game = game;
                     }
                     PlayEvent::Lobby { lobby, you, .. } => c.lobby = Some((lobby, you)),
                     PlayEvent::LobbyClosed { .. } => c.lobby = None,
@@ -317,11 +450,14 @@ impl GameApi {
                             }
                         }
                     }
-                    PlayEvent::Feedback { session, by } => {
+                    PlayEvent::Feedback { session, by, game } => {
                         if let Some((l, _)) = &mut c.lobby {
                             l.feedback = session.clone();
+                            l.feedback_game = game.clone();
                         }
-                        let _ = self.app.emit("feedback-changed", serde_json::json!({ "session": session, "by": by.display_name }));
+                        by_name = by.display_name.clone();
+                        let title = game.map(|g| g.title);
+                        let _ = self.app.emit("feedback-changed", serde_json::json!({ "session": session, "by": by.display_name, "game": title }));
                     }
                     PlayEvent::Ok { rid: Some(r) } if r >= APP_RID => {
                         lobby_changed = false;
@@ -339,9 +475,30 @@ impl GameApi {
             .unwrap_or(true);
         if lobby_changed {
             self.update_voice();
+            self.sync_room_feedback(&by_name);
             self.emit_state(false);
         }
         pass
+    }
+
+    /// Tell running games whether the voice room is recording them, so they show it and take
+    /// F12 screenshots (games only hear about their own lobby from the server).
+    fn sync_room_feedback(&self, by: &str) {
+        let mut conns = self.conns.lock().unwrap();
+        let recording = conns.iter().filter(|c| c.room).find_map(|c| {
+            let (l, _) = c.lobby.as_ref()?;
+            Some((l.feedback.clone()?, l.feedback_game.as_ref()?.slug.clone()))
+        });
+        // Only games past `welcome` (so this arrives after it).
+        for c in conns.iter_mut().filter(|c| !c.room && c.game.is_some()) {
+            let want = recording.as_ref().filter(|(_, slug)| *slug == c.slug).map(|(s, _)| s.clone());
+            if want != c.room_feedback {
+                c.room_feedback = want.clone();
+                if let Ok(text) = serde_json::to_string(&PlayEvent::RoomFeedback { session: want, by: by.into() }) {
+                    let _ = c.to_game.send(Message::Text(text.into()));
+                }
+            }
+        }
     }
 
     /// A message from the game, before it goes to the server.
@@ -363,9 +520,22 @@ impl GameApi {
         }
     }
 
-    /// Upload a screenshot the game took to the lobby's feedback recording.
+    /// Upload a screenshot the game took to its lobby's feedback recording, or to the voice
+    /// room's when that is recording this game.
     fn screenshot(&self, id: u64, frame: &[u8]) {
-        let found = self.with_conn(id, |c| (c.lobby.as_ref().and_then(|(l, _)| l.feedback.clone()), c.to_game.clone()));
+        let found = {
+            let conns = self.conns.lock().unwrap();
+            conns.iter().find(|c| c.id == id).map(|c| {
+                let lobby = c.lobby.as_ref().and_then(|(l, _)| l.feedback.clone());
+                let room = || {
+                    conns.iter().filter(|r| r.room).find_map(|r| {
+                        let (l, _) = r.lobby.as_ref()?;
+                        l.feedback.clone().filter(|_| l.feedback_game.as_ref().is_some_and(|g| g.slug == c.slug))
+                    })
+                };
+                (lobby.or_else(room), c.to_game.clone())
+            })
+        };
         let Some((session, to_game)) = found else { return };
         let tell = move |message: String| {
             let text = serde_json::to_string(&PlayEvent::Error { rid: None, message }).unwrap_or_default();
@@ -399,6 +569,7 @@ pub fn start(app: &AppHandle, config_dir: &Path, voice_settings: VoiceSettings) 
         next_id: AtomicU64::new(1),
         voice_settings: Arc::new(Mutex::new(voice_settings)),
         voice: Mutex::new(VoiceLink::default()),
+        titles: Mutex::new(HashMap::new()),
         app: app.clone(),
     });
     write_api_file(config_dir, &api)?;
@@ -502,7 +673,7 @@ async fn serve(app: AppHandle, api: Arc<GameApi>, stream: TcpStream) {
     let id = api.next_id.fetch_add(1, Ordering::Relaxed);
     let (to_game, mut for_game) = unbounded_channel::<Message>();
     let (to_server, mut for_server) = unbounded_channel::<Message>();
-    api.conns.lock().unwrap().push(GameConn { id, slug, to_game, to_server, game: None, you: None, lobby: None });
+    api.conns.lock().unwrap().push(GameConn { id, slug, room: false, to_game, to_server, game: None, you: None, lobby: None, room_feedback: None });
 
     let (mut game_tx, mut game_rx) = game.split();
     let (mut server_tx, mut server_rx) = server.split();
@@ -557,5 +728,65 @@ async fn serve(app: AppHandle, api: Arc<GameApi>, stream: TcpStream) {
     api.update_voice();
     api.emit_state(false);
     let _ = game_tx.close().await;
+    let _ = server_tx.close().await;
+}
+
+/// The voice room connection: like a game's, with the app on the game's end. `ready` gets the
+/// result of creating or joining the room.
+async fn run_room(
+    api: Arc<GameApi>,
+    id: u64,
+    server: crate::route::ServerSocket,
+    mut for_server: UnboundedReceiver<Message>,
+    ready: oneshot::Sender<Result<(), String>>,
+) {
+    let mut ready = Some(ready);
+    let (mut server_tx, mut server_rx) = server.split();
+    let mut ping = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        tokio::select! {
+            msg = server_rx.next() => match msg {
+                Some(Ok(Message::Binary(frame))) if frame.len() > PACKET_HEADER && frame[5] == MODE_VOICE => api.voice_in(id, &frame),
+                Some(Ok(Message::Text(t))) => {
+                    match serde_json::from_str::<PlayEvent>(t.as_str()) {
+                        Ok(PlayEvent::Error { rid: Some(r), message }) if r >= APP_RID && ready.is_some() => {
+                            let _ = ready.take().unwrap().send(Err(message));
+                            break;
+                        }
+                        Ok(PlayEvent::Lobby { .. }) => {
+                            if let Some(r) = ready.take() {
+                                let _ = r.send(Ok(()));
+                            }
+                        }
+                        Ok(PlayEvent::LobbyClosed { reason }) => {
+                            api.observe(id, t.as_str());
+                            let _ = api.app.emit("room-closed", reason);
+                            break;
+                        }
+                        _ => {}
+                    }
+                    api.observe(id, t.as_str());
+                }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                    if ready.is_none() && api.with_conn(id, |c| c.lobby.is_some()).unwrap_or(false) {
+                        let _ = api.app.emit("room-closed", "disconnected");
+                    }
+                    break;
+                }
+                Some(Ok(_)) => {}
+            },
+            Some(msg) = for_server.recv() => {
+                let close = matches!(msg, Message::Close(_));
+                if server_tx.send(msg).await.is_err() || close { break; }
+            }
+            _ = ping.tick() => {
+                if server_tx.send(Message::Text(r#"{"op":"ping"}"#.into())).await.is_err() { break; }
+            }
+        }
+    }
+    api.conns.lock().unwrap().retain(|c| c.id != id);
+    api.update_voice();
+    api.sync_room_feedback("");
+    api.emit_state(false);
     let _ = server_tx.close().await;
 }

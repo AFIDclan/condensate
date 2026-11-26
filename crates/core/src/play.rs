@@ -38,6 +38,19 @@
 //! server transcribes the voice, and the game's owner gets a timeline of who said what, with the
 //! screenshots in place, to read or hand to an LLM.
 //!
+//! ## Voice rooms
+//!
+//! The Condensate app can also connect with no game (leave out `game`), to hold a **voice
+//! room**: a lobby that isn't tied to a game, so friends can talk before and while they play.
+//! Rooms use the same commands and events as game lobbies; a room connection can only create and
+//! join rooms, and a game connection only lobbies for its own game. While the app is in a room it
+//! runs voice there instead of in any game lobby.
+//!
+//! A room's host can record feedback for a game they are playing: [`PlayCommand::SetFeedback`]
+//! with `game` set. Everyone's voice in the room goes into the recording, and the app uploads F12
+//! screenshots from that game's connections on each member's PC (it tells those games with
+//! [`PlayEvent::RoomFeedback`], so they show that recording is on).
+//!
 //! Lobby members are numbered per lobby: the host (whoever created it) is always 1 and everyone
 //! else gets 2, 3, ... in join order. When the host leaves, the lobby closes. This matches
 //! Godot's client/server model, where the server is peer 1.
@@ -169,6 +182,10 @@ pub enum PlayCommand {
         #[serde(default)]
         rid: Option<u64>,
         on: bool,
+        /// In a voice room: the game the recording is for (required to start one). Game lobbies
+        /// always record their own game.
+        #[serde(default)]
+        game: Option<String>,
     },
     /// Whether to include your voice in the lobby's feedback recordings (on by default).
     RecordMe {
@@ -188,8 +205,12 @@ fn default_max_members() -> u32 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum PlayEvent {
-    /// First message on every connection.
-    Welcome { you: PlayUser, game: PresenceGame },
+    /// First message on every connection. `game` is null on a voice room connection.
+    Welcome {
+        you: PlayUser,
+        #[serde(default)]
+        game: Option<PresenceGame>,
+    },
     /// A request with nothing else to report succeeded.
     Ok {
         #[serde(default)]
@@ -228,11 +249,23 @@ pub enum PlayEvent {
     /// The game should join that lobby (when Condensate launched the game for it, this arrives
     /// right after `welcome`).
     JoinRequested { lobby: String },
+    /// Sent by the app: the player's voice room started (`session` is set) or stopped recording
+    /// feedback for this game. Treat it like [`PlayEvent::Feedback`]: show that recording is on
+    /// and let the player take screenshots (the app uploads them to the room's recording).
+    RoomFeedback {
+        session: Option<String>,
+        /// Who started or stopped it (display name), when known.
+        #[serde(default)]
+        by: String,
+    },
     /// Feedback recording started (`session` is set) or stopped (`session` is null).
     Feedback {
         session: Option<String>,
         /// Who started or stopped it.
         by: PlayUser,
+        /// The game being recorded, while recording.
+        #[serde(default)]
+        game: Option<PresenceGame>,
     },
 }
 
@@ -262,6 +295,7 @@ fn yes() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LobbyInfo {
     pub id: String,
+    /// The game's id; empty for a voice room.
     pub game: String,
     pub max_members: u32,
     pub visibility: LobbyVisibility,
@@ -270,6 +304,9 @@ pub struct LobbyInfo {
     /// The feedback recording in progress, if any.
     #[serde(default)]
     pub feedback: Option<String>,
+    /// The game that recording is for.
+    #[serde(default)]
+    pub feedback_game: Option<PresenceGame>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

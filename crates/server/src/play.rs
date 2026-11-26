@@ -1,6 +1,6 @@
-//! Multiplayer: lobbies and the packet relay behind `/api/v1/play`. The protocol is described in
-//! `condensate_core::play`. Everything lives in memory; a lobby ends when its host leaves (or the
-//! server restarts).
+//! Multiplayer: lobbies, voice rooms and the packet relay behind `/api/v1/play`. The protocol is
+//! described in `condensate_core::play`. Everything lives in memory; a lobby ends when its host
+//! leaves (or the server restarts). A voice room is a lobby with no game.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -10,7 +10,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::response::Response;
 use bytes::{Bytes, BytesMut};
-use condensate_core::api::{PresenceGame, PresenceLobby, WsEvent};
+use condensate_core::api::{PresenceGame, PresenceLobby, PresenceRoom, WsEvent};
 use condensate_core::play::*;
 use futures::{SinkExt, StreamExt};
 use rand::Rng;
@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
-use crate::auth::authenticate;
+use crate::auth::{authenticate, AuthUser};
 use crate::error::{not_found, ApiResult};
 use crate::feedback::{create_session, Recorder};
 use crate::hub::broadcast_presence;
@@ -44,7 +44,8 @@ struct Inner {
 struct Conn {
     user_id: i64,
     user: PlayUser,
-    game: PresenceGame,
+    /// `None` for a voice room connection (from the app, with no game).
+    game: Option<PresenceGame>,
     /// `None` once the connection was dropped for falling behind.
     tx: Option<mpsc::Sender<Message>>,
     /// (lobby id, member id)
@@ -57,8 +58,10 @@ struct Conn {
 
 struct Lobby {
     id: String,
-    game: PresenceGame,
+    /// `None` for a voice room.
+    game: Option<PresenceGame>,
     host_user: i64,
+    host_name: String,
     max_members: u32,
     visibility: LobbyVisibility,
     data: Map<String, Value>,
@@ -66,8 +69,20 @@ struct Lobby {
     members: BTreeMap<u32, u64>,
     next_member: u32,
     invited: HashSet<i64>,
-    /// Feedback recording in progress: (session id, when it started).
-    feedback: Option<(Arc<str>, Instant)>,
+    feedback: Option<Recording>,
+}
+
+/// A feedback recording in progress.
+#[derive(Clone)]
+struct Recording {
+    session: Arc<str>,
+    started: Instant,
+    /// The game it's for (a room's host picks one; a game lobby records its own game).
+    game: PresenceGame,
+}
+
+fn same_game(a: &Option<PresenceGame>, b: &Option<PresenceGame>) -> bool {
+    a.as_ref().map(|g| &g.slug) == b.as_ref().map(|g| &g.slug)
 }
 
 impl Lobby {
@@ -82,14 +97,26 @@ impl Lobby {
             || (self.visibility == LobbyVisibility::Friends && friends.contains(&self.host_user))
     }
 
-    fn presence(&self) -> PresenceLobby {
-        PresenceLobby {
+    /// For a game lobby.
+    fn presence(&self) -> Option<PresenceLobby> {
+        Some(PresenceLobby {
             id: self.id.clone(),
-            game: self.game.clone(),
+            game: self.game.clone()?,
             members: self.members.len() as u32,
             max_members: self.max_members,
             recording: self.feedback.is_some(),
-        }
+        })
+    }
+
+    /// For a voice room.
+    fn room_presence(&self) -> Option<PresenceRoom> {
+        self.game.is_none().then(|| PresenceRoom {
+            id: self.id.clone(),
+            host: self.host_name.clone(),
+            members: self.members.len() as u32,
+            max_members: self.max_members,
+            recording: self.feedback.is_some(),
+        })
     }
 }
 
@@ -122,12 +149,13 @@ impl Inner {
     fn info(&self, lobby: &Lobby) -> LobbyInfo {
         LobbyInfo {
             id: lobby.id.clone(),
-            game: lobby.game.slug.clone(),
+            game: lobby.game.as_ref().map(|g| g.slug.clone()).unwrap_or_default(),
             max_members: lobby.max_members,
             visibility: lobby.visibility,
             members: lobby.members.iter().filter_map(|(id, c)| self.member(*id, *c)).collect(),
             data: lobby.data.clone(),
-            feedback: lobby.feedback.as_ref().map(|(s, _)| s.to_string()),
+            feedback: lobby.feedback.as_ref().map(|r| r.session.to_string()),
+            feedback_game: lobby.feedback.as_ref().map(|r| r.game.clone()),
         }
     }
 
@@ -148,8 +176,8 @@ impl Inner {
         let mut affected: Vec<i64> = self.user_of(conn).into_iter().collect();
         if member == 1 {
             let Some(lobby) = self.lobbies.remove(&lobby_id) else { return affected };
-            if let Some((session, _)) = lobby.feedback.clone() {
-                self.recorder.stop_session(session);
+            if let Some(rec) = lobby.feedback.clone() {
+                self.recorder.stop_session(rec.session);
             }
             for other in lobby.others(1) {
                 if let Some(c) = self.conns.get_mut(&other) {
@@ -169,14 +197,23 @@ impl Inner {
         affected
     }
 
-    /// A lobby the user is in that friends can see, for their presence.
-    fn presence_lobby(&self, user: i64) -> Option<PresenceLobby> {
+    /// Lobbies the user is in that friends can see.
+    fn visible_lobbies(&self, user: i64) -> impl Iterator<Item = &Lobby> {
         self.conns
             .values()
-            .filter(|c| c.user_id == user)
+            .filter(move |c| c.user_id == user)
             .filter_map(|c| self.lobbies.get(&c.lobby.as_ref()?.0))
-            .find(|l| l.visibility == LobbyVisibility::Friends)
-            .map(Lobby::presence)
+            .filter(|l| l.visibility == LobbyVisibility::Friends)
+    }
+
+    /// A game lobby the user is in that friends can see, for their presence.
+    fn presence_lobby(&self, user: i64) -> Option<PresenceLobby> {
+        self.visible_lobbies(user).find_map(Lobby::presence)
+    }
+
+    /// A voice room the user is in that friends can see, for their presence.
+    fn presence_room(&self, user: i64) -> Option<PresenceRoom> {
+        self.visible_lobbies(user).find_map(Lobby::room_presence)
     }
 }
 
@@ -187,14 +224,14 @@ impl Play {
 
     /// Whether a lobby is recording this feedback session right now.
     pub fn recording(&self, session: &str) -> bool {
-        self.with(|g| g.lobbies.values().any(|l| l.feedback.as_ref().is_some_and(|(s, _)| &**s == session)))
+        self.with(|g| g.lobbies.values().any(|l| l.feedback.as_ref().is_some_and(|r| &*r.session == session)))
     }
 
     /// If this user is in the lobby recording `session`: milliseconds since recording started.
     pub fn recording_member(&self, session: &str, user: i64) -> Option<i64> {
         self.with(|g| {
-            let lobby = g.lobbies.values().find(|l| l.feedback.as_ref().is_some_and(|(s, _)| &**s == session))?;
-            let (_, started) = lobby.feedback.as_ref()?;
+            let lobby = g.lobbies.values().find(|l| l.feedback.as_ref().is_some_and(|r| &*r.session == session))?;
+            let started = lobby.feedback.as_ref()?.started;
             lobby.members.values().any(|c| g.user_of(*c) == Some(user)).then(|| started.elapsed().as_millis() as i64)
         })
     }
@@ -245,8 +282,8 @@ fn relay_voice(g: &mut Inner, conn: u64, lobby_id: &str, me: u32, frame: Bytes) 
     }
     let (user, recorded) = (c.user_id, c.recorded);
     let Some(lobby) = g.lobbies.get(lobby_id) else { return };
-    if let (Some((session, _)), true) = (&lobby.feedback, recorded) {
-        g.recorder.frame(session.clone(), user, frame.slice(PACKET_HEADER..));
+    if let (Some(rec), true) = (&lobby.feedback, recorded) {
+        g.recorder.frame(rec.session.clone(), user, frame.slice(PACKET_HEADER..));
     }
     let targets: Vec<u64> = lobby.others(me).into_iter().filter(|t| g.conns.get(t).is_some_and(|c| c.voice)).collect();
     let mut out = BytesMut::from(&frame[..]);
@@ -257,13 +294,16 @@ fn relay_voice(g: &mut Inner, conn: u64, lobby_id: &str, me: u32, frame: Bytes) 
     }
 }
 
-/// Update the "joinable lobby" part of these users' presence, telling their friends.
+/// Update the "joinable lobby" and "voice room" parts of these users' presence, telling their
+/// friends.
 async fn refresh_presence(st: &AppState, mut users: Vec<i64>) {
     users.sort_unstable();
     users.dedup();
     for user in users {
-        let lobby = st.play.with(|g| g.presence_lobby(user));
-        if st.hub.set_lobby(user, lobby) {
+        let (lobby, room) = st.play.with(|g| (g.presence_lobby(user), g.presence_room(user)));
+        let lobby_changed = st.hub.set_lobby(user, lobby);
+        let room_changed = st.hub.set_room(user, room);
+        if lobby_changed || room_changed {
             broadcast_presence(st, user).await;
         }
     }
@@ -287,27 +327,33 @@ fn data_too_big(data: &Map<String, Value>) -> bool {
 #[derive(Deserialize)]
 pub struct PlayQuery {
     token: String,
-    game: String,
+    #[serde(default)]
+    game: Option<String>,
 }
 
-/// `GET /api/v1/play?token=...&game=<id>`: one connection per running game.
+/// A game the user can see, by id.
+async fn visible_game(st: &AppState, slug: &str, user: &AuthUser) -> ApiResult<Option<PresenceGame>> {
+    let row: Option<(String, String, i64, String)> =
+        sqlx::query_as("SELECT slug, title, owner_id, visibility FROM games WHERE slug = ?").bind(slug).fetch_optional(&st.db).await?;
+    Ok(row.filter(|(_, _, owner, vis)| visible_to(*owner, vis, user)).map(|(slug, title, _, _)| PresenceGame { slug, title }))
+}
+
+/// `GET /api/v1/play?token=...&game=<id>`: one connection per running game. Without `game`, a
+/// voice room connection (from the Condensate app).
 pub async fn ws(State(st): State<AppState>, Query(q): Query<PlayQuery>, upgrade: WebSocketUpgrade) -> ApiResult<Response> {
     let user = authenticate(&st, &q.token).await?;
     user.require_session()?;
-    let row: Option<(String, String, i64, String)> = sqlx::query_as("SELECT slug, title, owner_id, visibility FROM games WHERE slug = ?")
-        .bind(&q.game)
-        .fetch_optional(&st.db)
-        .await?;
-    let Some((slug, title, _, _)) = row.filter(|(_, _, owner, vis)| visible_to(*owner, vis, &user)) else {
-        return Err(not_found(format!("no game called {}", q.game)));
+    let game = match q.game.as_deref().filter(|g| !g.is_empty()) {
+        Some(slug) => Some(visible_game(&st, slug, &user).await?.ok_or_else(|| not_found(format!("no game called {slug}")))?),
+        None => None,
     };
     let display_name: String = sqlx::query_scalar("SELECT display_name FROM users WHERE id = ?").bind(user.id).fetch_one(&st.db).await?;
     let me = PlayUser { username: user.username.clone(), display_name };
-    let game = PresenceGame { slug, title };
-    Ok(upgrade.max_message_size(MAX_PACKET + PACKET_HEADER).on_upgrade(move |socket| run(st, user.id, me, game, socket)))
+    Ok(upgrade.max_message_size(MAX_PACKET + PACKET_HEADER).on_upgrade(move |socket| run(st, user, me, game, socket)))
 }
 
-async fn run(st: AppState, user_id: i64, me: PlayUser, game: PresenceGame, socket: WebSocket) {
+async fn run(st: AppState, user: AuthUser, me: PlayUser, game: Option<PresenceGame>, socket: WebSocket) {
+    let user_id = user.id;
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<Message>(OUTBOX);
     let welcome = PlayEvent::Welcome { you: me.clone(), game: game.clone() };
@@ -334,7 +380,7 @@ async fn run(st: AppState, user_id: i64, me: PlayUser, game: PresenceGame, socke
             msg = tokio::time::timeout(Duration::from_secs(90), stream.next()) => match msg {
                 Ok(Some(Ok(Message::Binary(frame)))) => st.play.relay(conn, frame),
                 Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<PlayCommand>(text.as_str()) {
-                    Ok(cmd) => handle(&st, conn, user_id, cmd).await,
+                    Ok(cmd) => handle(&st, conn, &user, cmd).await,
                     Err(e) => st.play.error(conn, None, format!("bad command: {e}")),
                 },
                 Ok(Some(Ok(_))) => {}
@@ -352,8 +398,9 @@ async fn run(st: AppState, user_id: i64, me: PlayUser, game: PresenceGame, socke
     refresh_presence(&st, affected).await;
 }
 
-async fn handle(st: &AppState, conn: u64, user_id: i64, cmd: PlayCommand) {
+async fn handle(st: &AppState, conn: u64, user: &AuthUser, cmd: PlayCommand) {
     let play = &st.play;
+    let user_id = user.id;
     match cmd {
         PlayCommand::Ping => {}
 
@@ -369,7 +416,7 @@ async fn handle(st: &AppState, conn: u64, user_id: i64, cmd: PlayCommand) {
             g.event(conn, &PlayEvent::Ok { rid });
         }),
 
-        PlayCommand::SetFeedback { rid, on } => set_feedback(st, conn, user_id, rid, on).await,
+        PlayCommand::SetFeedback { rid, on, game } => set_feedback(st, conn, user, rid, on, game).await,
 
         PlayCommand::CreateLobby { rid, max_members, visibility, data } => {
             if !(2..=MAX_MEMBERS).contains(&max_members) {
@@ -386,6 +433,7 @@ async fn handle(st: &AppState, conn: u64, user_id: i64, cmd: PlayCommand) {
                     id: id.clone(),
                     game: g.conns[&conn].game.clone(),
                     host_user: user_id,
+                    host_name: g.conns[&conn].user.display_name.clone(),
                     max_members,
                     visibility,
                     data,
@@ -410,7 +458,7 @@ async fn handle(st: &AppState, conn: u64, user_id: i64, cmd: PlayCommand) {
                 if me.lobby.as_ref().is_some_and(|(id, _)| *id == lobby_id) {
                     return Err("you're already in that lobby");
                 }
-                let lobby = g.lobbies.get(&lobby_id).filter(|l| l.game.slug == me.game.slug).ok_or("that lobby has closed")?;
+                let lobby = g.lobbies.get(&lobby_id).filter(|l| same_game(&l.game, &me.game)).ok_or("that lobby has closed")?;
                 if !lobby.can_join(user_id, &friends) {
                     return Err("you need an invite to join that lobby");
                 }
@@ -460,7 +508,11 @@ async fn handle(st: &AppState, conn: u64, user_id: i64, cmd: PlayCommand) {
                 let (lobby_id, _) = g.conns[&conn].lobby.clone()?;
                 let lobby = g.lobbies.get_mut(&lobby_id)?;
                 lobby.invited.insert(target_id);
-                Some(WsEvent::LobbyInvite { from: me.username, from_name: me.display_name, lobby: lobby.presence() })
+                match (lobby.presence(), lobby.room_presence()) {
+                    (Some(lobby), _) => Some(WsEvent::LobbyInvite { from: me.username, from_name: me.display_name, lobby }),
+                    (_, Some(room)) => Some(WsEvent::RoomInvite { from: me.username, from_name: me.display_name, room }),
+                    _ => None,
+                }
             });
             match invite {
                 Some(event) => {
@@ -525,7 +577,7 @@ async fn handle(st: &AppState, conn: u64, user_id: i64, cmd: PlayCommand) {
                 let lobbies = g
                     .lobbies
                     .values()
-                    .filter(|l| l.game.slug == me.game.slug && Some(&l.id) != mine.as_ref())
+                    .filter(|l| same_game(&l.game, &me.game) && Some(&l.id) != mine.as_ref())
                     .filter(|l| l.can_join(user_id, &friends) && (l.members.len() as u32) < l.max_members)
                     .filter_map(|l| {
                         let host = g.conns.get(l.members.get(&1)?)?.user.clone();
@@ -556,18 +608,17 @@ async fn handle(st: &AppState, conn: u64, user_id: i64, cmd: PlayCommand) {
                 }
                 _ => vec![],
             };
-            let my_game = play.with(|g| g.conns[&conn].game.slug.clone());
+            let my_game = play.with(|g| g.conns[&conn].game.as_ref().map(|g| g.slug.clone()));
             let friends = rows
                 .into_iter()
                 .map(|(id, username, display_name, last_seen)| {
                     let p = st.hub.presence(id, last_seen);
-                    PlayFriend {
-                        username,
-                        display_name,
-                        status: p.status,
-                        game: p.game.map(|g| g.slug),
-                        lobby: p.lobby.filter(|l| l.game.slug == my_game).map(|l| l.id),
-                    }
+                    // The lobby (or, for a room connection, the room) this connection could join.
+                    let lobby = match &my_game {
+                        Some(slug) => p.lobby.filter(|l| &l.game.slug == slug).map(|l| l.id),
+                        None => p.room.map(|r| r.id),
+                    };
+                    PlayFriend { username, display_name, status: p.status, game: p.game.map(|g| g.slug), lobby }
                 })
                 .collect();
             play.reply(conn, PlayEvent::Friends { rid, friends });
@@ -575,26 +626,38 @@ async fn handle(st: &AppState, conn: u64, user_id: i64, cmd: PlayCommand) {
     }
 }
 
-/// Host only: start or stop the lobby's feedback recording.
-async fn set_feedback(st: &AppState, conn: u64, user_id: i64, rid: Option<u64>, on: bool) {
+/// Host only: start or stop the lobby's feedback recording. A voice room records the game the
+/// host names; a game lobby records its own game.
+async fn set_feedback(st: &AppState, conn: u64, user: &AuthUser, rid: Option<u64>, on: bool, game: Option<String>) {
     let play = &st.play;
-    let check = play.with(|g| -> Result<(String, bool), &str> {
+    let user_id = user.id;
+    let check = play.with(|g| -> Result<(Option<PresenceGame>, bool), &str> {
         let (lobby_id, member) = g.conns[&conn].lobby.clone().ok_or("you're not in a lobby")?;
         if member != 1 {
             return Err("only the host can start or stop feedback recording");
         }
         let lobby = g.lobbies.get(&lobby_id).ok_or("you're not in a lobby")?;
-        Ok((lobby.game.slug.clone(), lobby.feedback.is_some()))
+        Ok((lobby.game.clone(), lobby.feedback.is_some()))
     });
-    let (slug, recording) = match check {
+    let (lobby_game, recording) = match check {
         Ok(c) => c,
         Err(e) => return play.error(conn, rid, e),
     };
     if on == recording {
         return play.reply(conn, PlayEvent::Ok { rid });
     }
-    let session: Option<Arc<str>> = if on {
-        match create_session(&st.db, &slug, user_id).await {
+    // The game being recorded. Only needed (and looked up) when starting.
+    let game = match (lobby_game, game.filter(|g| !g.is_empty())) {
+        _ if !on => None,
+        (Some(game), _) => Some(game),
+        (None, Some(slug)) => match visible_game(st, &slug, user).await {
+            Ok(Some(game)) => Some(game),
+            _ => return play.error(conn, rid, format!("no game called {slug}")),
+        },
+        (None, None) => return play.error(conn, rid, "say which game to record feedback for"),
+    };
+    let session: Option<Arc<str>> = if let Some(game) = &game {
+        match create_session(&st.db, &game.slug, user_id).await {
             Ok(id) => Some(id.into()),
             Err(e) => {
                 tracing::warn!("feedback: can't create session: {e:#}");
@@ -608,20 +671,20 @@ async fn set_feedback(st: &AppState, conn: u64, user_id: i64, rid: Option<u64>, 
         let (lobby_id, member) = g.conns[&conn].lobby.clone()?;
         let by = g.conns[&conn].user.clone();
         let lobby = g.lobbies.get_mut(&lobby_id).filter(|_| member == 1)?;
-        match &session {
-            Some(s) if lobby.feedback.is_none() => {
+        match (&session, &game) {
+            (Some(s), Some(game)) if lobby.feedback.is_none() => {
                 let started = Instant::now();
-                lobby.feedback = Some((s.clone(), started));
+                lobby.feedback = Some(Recording { session: s.clone(), started, game: game.clone() });
                 g.recorder.start_session(s.clone(), started);
             }
-            Some(_) => return None,
-            None => {
-                let (old, _) = lobby.feedback.take()?;
-                g.recorder.stop_session(old);
+            (Some(_), _) => return None,
+            (None, _) => {
+                let old = lobby.feedback.take()?;
+                g.recorder.stop_session(old.session);
             }
         }
         let everyone: Vec<u64> = g.lobbies[&lobby_id].members.values().copied().collect();
-        let event = PlayEvent::Feedback { session: session.as_ref().map(|s| s.to_string()), by };
+        let event = PlayEvent::Feedback { session: session.as_ref().map(|s| s.to_string()), by, game: game.clone() };
         let mut users = vec![];
         for c in everyone {
             users.extend(g.user_of(c));

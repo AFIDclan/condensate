@@ -106,6 +106,20 @@ export function jobText(job: Job): string {
   return f === null ? "Downloading" : `Downloading ${Math.floor(f * 100)}%`;
 }
 
+/** Games whose Play was clicked a moment ago. Extra clicks are ignored until the library shows
+ * the game as running, so a double-click doesn't launch two copies. */
+const launching = new Set<string>();
+
+async function playOnce(slug: string): Promise<void> {
+  if (launching.has(slug)) return;
+  launching.add(slug);
+  try {
+    await api.play(slug);
+  } finally {
+    setTimeout(() => launching.delete(slug), 3000);
+  }
+}
+
 /** Library actions with error toasts. Each resolves to true on success. */
 export function useActions(refresh: () => void) {
   const toast = useToast();
@@ -125,7 +139,7 @@ export function useActions(refresh: () => void) {
         };
       return {
         install: wrap(api.install),
-        play: wrap(api.play),
+        play: wrap(playOnce),
         openFolder: wrap(api.openGameFolder),
         uninstall: wrap(api.uninstall, true),
         remove: wrap(api.removeFromLibrary, true),

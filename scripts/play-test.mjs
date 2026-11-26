@@ -95,6 +95,8 @@ function open(url) {
 }
 
 const play = (token) => open(`${ws}/api/v1/play?token=${token}&game=${game}`);
+/** A voice room connection: no game. */
+const room = (token) => open(`${ws}/api/v1/play?token=${token}`);
 const hub = (token) => open(`${ws}/api/v1/ws?token=${token}`);
 const packet = (peer, payload) => {
   const out = new Uint8Array(6 + payload.length);
@@ -226,6 +228,65 @@ try {
     check((await rest("GET", `/games/${game}/feedback`, alice)).json.some((f) => f.id === session), "alice's recordings list has it");
     check((await rest("DELETE", `/feedback/${session}`, alice)).ok && (await rest("GET", `/feedback/${session}`, alice)).status === 404, "alice deletes it");
     for (const s of [h, m, o, watcher]) s.sock.close();
+  }
+
+  // Voice rooms: lobbies with no game, which can record feedback for a game the host names.
+  {
+    const [r1, r2, g, carolHub2, bobHub2] = [room(alice), room(bob), play(carol), hub(carol), hub(bob)];
+    await Promise.all([r1, r2, g, carolHub2, bobHub2].map((s) => s.ready));
+    check((await r1.next((m) => m.op === "welcome")).game === null, "a room connection's welcome has no game");
+    const made = await r1.request({ op: "create_lobby", max_members: 16 });
+    const roomId = made.lobby?.id;
+    check(made.op === "lobby" && made.you === 1 && made.lobby.game === "", "alice starts a voice room");
+    const seen = await bobHub2.next((m) => m.type === "presence" && m.user === "alice" && m.presence.room);
+    check(seen.presence.room.id === roomId && seen.presence.room.host === "Alice" && !seen.presence.lobby, "bob sees alice's room (not as a game lobby)");
+    check((await r2.request({ op: "list_friends" })).friends.some((f) => f.username === "alice" && f.lobby === roomId), "list_friends on a room connection shows the room");
+    check((await g.request({ op: "join_lobby", lobby: roomId })).op === "error", "a game connection can't join a voice room");
+    const gameLobby = await g.request({ op: "create_lobby", max_members: 2 });
+    check((await r2.request({ op: "join_lobby", lobby: gameLobby.lobby.id })).op === "error", "a room connection can't join a game lobby");
+    check((await r1.request({ op: "invite", user: "carol" })).op === "ok", "alice invites carol to the room");
+    const inv = await carolHub2.next((m) => m.type === "room_invite");
+    check(inv.from === "alice" && inv.room.id === roomId, "carol's app gets a room invite");
+    check((await r2.request({ op: "join_lobby", lobby: roomId })).op === "lobby", "bob joins the room");
+    await r1.next((m) => m.op === "member_joined");
+    await r1.request({ op: "voice", on: true });
+    await r2.request({ op: "voice", on: true });
+    const voiceFrame = (n) => {
+      const f = new Uint8Array(6 + 40).fill(n & 255);
+      f.fill(0, 0, 6);
+      f[5] = 3;
+      return f;
+    };
+    r1.sock.send(voiceFrame(7));
+    const heard = await r2.next((m) => m.binary);
+    check(heard.binary[5] === 3 && new DataView(heard.binary.buffer).getUint32(0, true) === 1, "bob hears alice in the room");
+
+    const noGame = await r1.request({ op: "set_feedback", on: true });
+    check(noGame.op === "error" && /which game/.test(noGame.message), "a room needs a game to record feedback for");
+    check((await r1.request({ op: "set_feedback", on: true, game: "no-such-game" })).op === "error", "the game must exist");
+    check((await r1.request({ op: "set_feedback", on: true, game })).op === "ok", "alice records feedback for the game from the room");
+    const started = await r2.next((m) => m.op === "feedback");
+    const session = started.session;
+    check(!!session && started.game?.slug === game && !!started.game?.title, "the room hears which game is being recorded");
+    check(!!(await bobHub2.next((m) => m.type === "presence" && m.user === "alice" && m.presence.room?.recording)), "friends see the room is recording");
+    for (let i = 0; i < 50; i++) {
+      r1.sock.send(voiceFrame(i));
+      await sleep(20);
+    }
+    check((await rest("POST", `/feedback/${session}/shots`, bob, shotBody({ scene: "res://room.tscn" }))).ok, "bob, in the room, saves a screenshot to it");
+    check((await rest("POST", `/feedback/${session}/shots`, carol, shotBody({}))).status === 403, "carol, not in the room, can't");
+    await sleep(1500);
+    check((await r1.request({ op: "set_feedback", on: false })).op === "ok", "alice stops the room's recording");
+    const rec = await finished(session);
+    check(rec.utterances.length === 1 && rec.utterances[0].username === "alice", "the room's voice was recorded");
+    check(rec.shots.length === 1 && rec.shots[0].meta.scene === "res://room.tscn", "the screenshot is in the recording");
+    check((await rest("GET", `/games/${game}/feedback`, alice)).json.some((f) => f.id === session), "the recording belongs to the game");
+    await rest("DELETE", `/feedback/${session}`, alice);
+
+    r1.sock.close();
+    check((await r2.next((m) => m.op === "lobby_closed")).reason === "host_left", "the room closes when its host leaves");
+    check(!!(await bobHub2.next((m) => m.type === "presence" && m.user === "alice" && !m.presence.room)), "and leaves alice's presence");
+    for (const s of [r2, g, carolHub2, bobHub2]) s.sock.close();
   }
 
   if (appFile) {

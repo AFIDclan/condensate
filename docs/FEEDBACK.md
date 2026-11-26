@@ -4,16 +4,22 @@
 
 Everyone in a multiplayer lobby can talk. Voice starts on its own when a game joins a lobby; games need no code for it.
 
+**Voice rooms** work without a game. Press **Start** under **Voice room** on the Friends page, then invite friends with the **+** in the voice panel (or the **Invite** button next to an online friend). Friends see **Voice** next to your name and can join from there. The room keeps going while you launch and play games, and while you're in one, voice runs in the room instead of in any game lobby. The room ends when its host leaves.
+
 - **Who handles the audio:** the Condensate app, not the game. It captures the microphone, removes background noise (RNNoise), detects speech and compresses it with Opus.
 - **When it sends:** only while you talk, like Discord's voice activity. There's no push-to-talk.
 - **How it travels:** frames go over the same server connection as the game's traffic, and the server forwards them to everyone else in the lobby who is on voice.
 - **Settings:** in **Account → Voice chat**: microphone and speakers, automatic or manual sensitivity (with a level meter and a mic test), noise suppression and volume.
-- **In a lobby:** a panel in the bottom-left corner of the app shows who's talking, with mute and deafen buttons.
+- **In a room or lobby:** a panel in the bottom-left corner of the app shows who's talking, with mute and deafen buttons.
 - **Echo:** there's no echo cancellation yet. Use headphones, or friends will hear themselves through your microphone.
 
 ## Feedback recordings
 
-The lobby's host can start a feedback recording from the voice panel in the app, or from the game with `Condensate.set_feedback(true)`. While it runs, the server saves:
+The lobby's host can start a feedback recording from the voice panel in the app, or from the game with `Condensate.set_feedback(true)`.
+
+In a voice room, the room's host starts the game and then presses **Record feedback** in the voice panel. The recording is for the game the host is playing, and everyone in the room is recorded. Games don't need the Condensate addon for voice; F12 screenshots do need it. The app tells games using the addon that the room is recording them (the `room_feedback` message), so they show "● REC" and take screenshots.
+
+While a recording runs, the server saves:
 
 - **Voice:** each player's voice, stored separately. The transcript always knows who said what.
 - **Screenshots:** taken when a player presses **F12** in the game. They're saved with the game's version, the current scene, and anything the game adds through `Condensate.feedback_context`.
@@ -21,7 +27,7 @@ The lobby's host can start a feedback recording from the voice panel in the app,
 Players always know when they're being recorded:
 - the game shows a "● REC" corner indicator and an announcement;
 - the app's voice panel turns red;
-- the Join button on the Friends page says "Join · REC".
+- the Join button on the Friends page says "Join · REC" ("Voice · REC" for a room).
 
 Any player can leave their voice out with **Leave me out** in the voice panel.
 

@@ -270,6 +270,22 @@ pub struct Presence {
     /// A multiplayer lobby they're in that their friends can join.
     #[serde(default)]
     pub lobby: Option<PresenceLobby>,
+    /// A voice room they're in that their friends can join.
+    #[serde(default)]
+    pub room: Option<PresenceRoom>,
+}
+
+/// A voice room: a lobby with no game, for talking before and while playing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PresenceRoom {
+    pub id: String,
+    /// Display name of the host.
+    pub host: String,
+    pub members: u32,
+    pub max_members: u32,
+    /// Recording feedback for a game's developer.
+    #[serde(default)]
+    pub recording: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -331,6 +347,8 @@ pub enum WsEvent {
     FriendsChanged,
     /// A friend invited you to their multiplayer lobby.
     LobbyInvite { from: String, from_name: String, lobby: PresenceLobby },
+    /// A friend invited you to their voice room.
+    RoomInvite { from: String, from_name: String, room: PresenceRoom },
 }
 
 /// Client -> server commands on the socket.
